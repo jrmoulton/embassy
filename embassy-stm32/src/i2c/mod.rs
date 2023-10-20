@@ -8,27 +8,12 @@ mod _version;
 use core::future::Future;
 use core::marker::PhantomData;
 
-use embassy_hal_internal::{into_ref, Peripheral, PeripheralRef};
-use embassy_sync::waitqueue::AtomicWaker;
-#[cfg(feature = "time")]
-use embassy_time::{Duration, Instant};
-
-use crate::dma::NoDma;
-use crate::gpio::sealed::AFType;
-use crate::gpio::Pull;
-use crate::interrupt::typelevel::Interrupt;
-use crate::time::Hertz;
-use crate::{interrupt, peripherals};
-
-/// I2C error.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     /// Bus error
     Bus,
-    /// Arbitration lost
-    Arbitration,
-    /// ACK not received (either to the address or to a data byte)
+    Arbitration, // in case of master mode: lost arbitration to another master
     Nack,
     /// Timeout
     Timeout,
@@ -38,6 +23,13 @@ pub enum Error {
     Overrun,
     /// Zero-length transfers are not allowed.
     ZeroLengthTransfer,
+    Collission, // in case of slave mode, during sending data to master
+    BufferEmpty,
+    BufferFull,
+    BufferNotEmpty,
+    BufferNotFilled,
+    BufferSize,
+    OkBufferTransferred, // not really an error, but signalling that the slave does nack the last byte
 }
 
 /// I2C config
