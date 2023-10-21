@@ -29,7 +29,6 @@ pub enum Error {
     BufferNotEmpty,
     BufferNotFilled,
     BufferSize,
-    OkBufferTransferred, // not really an error, but signalling that the slave does nack the last byte
 }
 
 /// I2C config
