@@ -26,8 +26,6 @@ pub enum Error {
     Collission, // in case of slave mode, during sending data to master
     BufferEmpty,
     BufferFull,
-    BufferNotEmpty,
-    BufferNotFilled,
     BufferSize,
 }
 
