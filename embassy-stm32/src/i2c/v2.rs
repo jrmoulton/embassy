@@ -1258,6 +1258,84 @@ impl Timings {
     }
 }
 
+#[cfg(feature = "unstable-traits")]
+mod eh1 {
+    use super::*;
+
+    impl embedded_hal_1::i2c::Error for Error {
+        fn kind(&self) -> embedded_hal_1::i2c::ErrorKind {
+            match *self {
+                Self::Bus => embedded_hal_1::i2c::ErrorKind::Bus,
+                Self::Arbitration => embedded_hal_1::i2c::ErrorKind::ArbitrationLoss,
+                Self::Nack => {
+                    embedded_hal_1::i2c::ErrorKind::NoAcknowledge(embedded_hal_1::i2c::NoAcknowledgeSource::Unknown)
+                }
+                Self::Timeout => embedded_hal_1::i2c::ErrorKind::Other,
+                Self::Crc => embedded_hal_1::i2c::ErrorKind::Other,
+                Self::Overrun => embedded_hal_1::i2c::ErrorKind::Overrun,
+                Self::ZeroLengthTransfer => embedded_hal_1::i2c::ErrorKind::Other,
+                Self::BufferSize => embedded_hal_1::i2c::ErrorKind::Other,
+            }
+        }
+    }
+
+    impl<'d, T: Instance, TXDMA, RXDMA> embedded_hal_1::i2c::ErrorType for I2c<'d, T, TXDMA, RXDMA> {
+        type Error = Error;
+    }
+
+    impl<'d, T: Instance> embedded_hal_1::i2c::I2c for I2c<'d, T, NoDma, NoDma> {
+        fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
+            self.blocking_read(address, read)
+        }
+
+        fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
+            self.blocking_write(address, write)
+        }
+
+        fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
+            self.blocking_write_read(address, write, read)
+        }
+
+        fn transaction(
+            &mut self,
+            _address: u8,
+            _operations: &mut [embedded_hal_1::i2c::Operation<'_>],
+        ) -> Result<(), Self::Error> {
+            todo!();
+        }
+    }
+}
+
+#[cfg(all(feature = "unstable-traits", feature = "nightly", feature = "time"))]
+mod eha {
+    use super::super::{RxDma, TxDma};
+    use super::*;
+
+    impl<'d, T: Instance, TXDMA: TxDma<T>, RXDMA: RxDma<T>> embedded_hal_async::i2c::I2c for I2c<'d, T, TXDMA, RXDMA> {
+        async fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
+            self.read(address, read).await
+        }
+
+        async fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
+            self.write(address, write).await
+        }
+
+        async fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
+            self.write_read(address, write, read).await
+        }
+
+        async fn transaction(
+            &mut self,
+            address: u8,
+            operations: &mut [embedded_hal_1::i2c::Operation<'_>],
+        ) -> Result<(), Self::Error> {
+            let _ = address;
+            let _ = operations;
+            todo!()
+        }
+    }
+}
+
 impl<'d, T: Instance> SetConfig for I2c<'d, T> {
     type Config = Hertz;
     type ConfigError = ();
