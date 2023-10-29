@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 use core::cmp;
 use core::future::poll_fn;
-use core::task::Poll;
+use core::marker::PhantomData;
 
 use embassy_embedded_hal::SetConfig;
 use embassy_hal_internal::drop::OnDrop;
@@ -11,6 +11,8 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::waitqueue::AtomicWaker;
 #[cfg(feature = "time")]
 use embassy_time::{Duration, Instant};
+#[cfg(feature = "time")]
+use futures::task::Poll;
 use stm32_metapac::i2c::vals;
 
 use super::*;
@@ -91,28 +93,26 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
                     state_m.result = None;
 
                     if state_m.dir == Dir::READ {
+                        // flush i2c tx register
+                        regs.isr().write(|w| w.set_txe(true));
+
                         // Set the nbytes START and prepare to receive bytes into `buffer`.
+                        // Set the actual number of bytes to transfer
+                        // error case that n = 0  cannot be handled by i2c, we need to send at least 1 byte.
+                        let (b, size) = match state_m.read_byte() {
+                            Ok(b) => (b, state_m.get_size()),
+                            _ => (0xFF, 1),
+                        };
                         regs.cr2().modify(|w| {
-                            // Set number of bytes to transfer: maximum as all incoming bytes will be ACK'ed
-                            w.set_nbytes(state_m.get_size());
+                            w.set_nbytes(size);
                             // during sending nbytes automatically send a ACK, stretch clock after last byte
                             w.set_reload(vals::Reload::COMPLETED);
                         });
+                        regs.txdr().write(|w| w.set_txdata(b));
                         // restore sbc after a master_write_read transaction
                         T::regs().cr1().modify(|reg| {
                             reg.set_sbc(true);
                         });
-                        // flush i2c tx register
-                        regs.isr().write(|w| w.set_txe(true));
-                        // fill rx data with the first byte
-                        let b = match state_m.read_byte() {
-                            Ok(b) => b,
-                            Err(e) => {
-                                state_m.result = Some(e);
-                                0xFF
-                            }
-                        };
-                        regs.txdr().write(|w| w.set_txdata(b));
                     } else {
                         // Set the nbytes to the maximum buffer size and wait for the bytes from the master
                         regs.cr2().modify(|w| {
@@ -965,16 +965,18 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2c<'d, T, TXDMA, RXDMA> {
     }
 
     pub fn set_address_1(&self, address7: u8) -> Result<(), Error> {
-        T::regs().oar1().modify(|reg| {
+        T::regs().oar1().write(|reg| {
             reg.set_oa1en(false);
         });
-        T::regs().oar1().modify(|reg| {
-            reg.set_oa1(address7 as u16);
+        let adress_u16 = address7 as u16;
+        T::regs().oar1().write(|reg| {
+            reg.set_oa1(adress_u16 << 1);
+            reg.set_oa1mode(vals::Addmode::BIT7);
             reg.set_oa1en(true);
         });
         T::state().mutex.lock(|f| {
             let mut state_m = f.borrow_mut();
-            state_m.address1 = address7 as u16;
+            state_m.address1 = adress_u16;
         });
         Ok(())
     }
