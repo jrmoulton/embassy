@@ -1,7 +1,7 @@
 //! Inter-Integrated-Circuit (I2C)
 #![macro_use]
 
-use stm32_metapac::i2c::vals::Oamsk;
+use stm32_metapac::i2c;
 
 use crate::interrupt;
 
@@ -9,8 +9,9 @@ use crate::interrupt;
 #[cfg_attr(i2c_v2, path = "v2.rs")]
 mod _version;
 
-use core::future::Future;
-use core::marker::PhantomData;
+mod v2slave;
+
+use crate::peripherals;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -28,13 +29,7 @@ pub enum Error {
     /// Zero-length transfers are not allowed.
     ZeroLengthTransfer,
     BufferSize,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-#[repr(usize)]
-pub enum AddressType {
-    Address1 = 0,
-    Address2,
+    NoTransaction,
 }
 
 #[repr(u8)]
@@ -51,18 +46,24 @@ pub enum Address2Mask {
 }
 impl Address2Mask {
     #[inline(always)]
-    pub const fn to_vals_impl(self) -> Oamsk {
+    pub const fn to_vals_impl(self) -> i2c::vals::Oamsk {
         match self {
-            Address2Mask::NOMASK => Oamsk::NOMASK,
-            Address2Mask::MASK1 => Oamsk::MASK1,
-            Address2Mask::MASK2 => Oamsk::MASK2,
-            Address2Mask::MASK3 => Oamsk::MASK3,
-            Address2Mask::MASK4 => Oamsk::MASK4,
-            Address2Mask::MASK5 => Oamsk::MASK5,
-            Address2Mask::MASK6 => Oamsk::MASK6,
-            Address2Mask::MASK7 => Oamsk::MASK7,
+            Address2Mask::NOMASK => i2c::vals::Oamsk::NOMASK,
+            Address2Mask::MASK1 => i2c::vals::Oamsk::MASK1,
+            Address2Mask::MASK2 => i2c::vals::Oamsk::MASK2,
+            Address2Mask::MASK3 => i2c::vals::Oamsk::MASK3,
+            Address2Mask::MASK4 => i2c::vals::Oamsk::MASK4,
+            Address2Mask::MASK5 => i2c::vals::Oamsk::MASK5,
+            Address2Mask::MASK6 => i2c::vals::Oamsk::MASK6,
+            Address2Mask::MASK7 => i2c::vals::Oamsk::MASK7,
         }
     }
+}
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[repr(usize)]
+pub enum AddressIndex {
+    Address1 = 0,
+    Address2 = 2,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
