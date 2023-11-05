@@ -9,7 +9,7 @@ use crate::interrupt;
 #[cfg_attr(i2c_v2, path = "v2.rs")]
 mod _version;
 
-mod v2slave;
+pub mod v2slave;
 
 use crate::peripherals;
 
