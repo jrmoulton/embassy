@@ -8,13 +8,14 @@ use embassy_hal_internal::drop::OnDrop;
 use embassy_hal_internal::{into_ref, PeripheralRef};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::waitqueue::AtomicWaker;
 #[cfg(feature = "time")]
 use embassy_time::{Duration, Instant};
 #[cfg(feature = "time")]
 use futures::task::Poll;
 
-use super::v2slave::SlaveState;
+use super::v2slave::{SlaveState, SlaveTransaction, SLAVE_QUEUE_DEPTH};
 use crate::dma::NoDma;
 #[cfg(feature = "time")]
 use crate::dma::Transfer;
@@ -102,6 +103,7 @@ impl Default for Config {
 
 pub struct State {
     pub(crate) waker: AtomicWaker,
+    pub(crate) channel_out: Channel<CriticalSectionRawMutex, SlaveTransaction, SLAVE_QUEUE_DEPTH>,
     pub(crate) mutex: Mutex<CriticalSectionRawMutex, RefCell<SlaveState>>,
 }
 
@@ -109,6 +111,7 @@ impl State {
     pub(crate) const fn new() -> Self {
         Self {
             waker: AtomicWaker::new(),
+            channel_out: Channel::new(),
             mutex: Mutex::new(RefCell::new(SlaveState::new())),
         }
     }
