@@ -9,19 +9,13 @@ use crate::time::Hertz;
 pub const HSI48_FREQ: Hertz = Hertz(48_000_000);
 
 /// Configuration for the HSI48 clock
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Hsi48Config {
     /// Enable CRS Sync from USB Start Of Frame (SOF) events.
     /// Required if HSI48 is going to be used as USB clock.
     ///
     /// Other use cases of CRS are not supported yet.
     pub sync_from_usb: bool,
-}
-
-impl Default for Hsi48Config {
-    fn default() -> Self {
-        Self { sync_from_usb: false }
-    }
 }
 
 pub(crate) fn init_hsi48(config: Hsi48Config) -> Hertz {
@@ -37,11 +31,11 @@ pub(crate) fn init_hsi48(config: Hsi48Config) -> Hertz {
     let r = RCC.crrcr();
     #[cfg(any(stm32u5, stm32g0, stm32h5, stm32h7, stm32h7rs, stm32u5, stm32wba))]
     let r = RCC.cr();
-    #[cfg(any(stm32f0))]
+    #[cfg(stm32f0)]
     let r = RCC.cr2();
 
     r.modify(|w| w.set_hsi48on(true));
-    while r.read().hsi48rdy() == false {}
+    while !r.read().hsi48rdy() {}
 
     if config.sync_from_usb {
         crate::peripherals::CRS::enable_and_reset();

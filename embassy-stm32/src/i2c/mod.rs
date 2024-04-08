@@ -43,7 +43,7 @@ pub enum Error {
 
 /// I2C config
 #[non_exhaustive]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct Config {
     /// Enable internal pullup on SDA.
     ///
@@ -60,17 +60,6 @@ pub struct Config {
     pub timeout: embassy_time::Duration,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            sda_pullup: false,
-            scl_pullup: false,
-            #[cfg(feature = "time")]
-            timeout: embassy_time::Duration::from_millis(1000),
-        }
-    }
-}
-
 /// I2C driver.
 pub struct I2c<'d, T: Instance, M: Mode> {
     _peri: PeripheralRef<'d, T>,
@@ -83,6 +72,7 @@ pub struct I2c<'d, T: Instance, M: Mode> {
 
 impl<'d, T: Instance> I2c<'d, T, Async> {
     /// Create a new I2C driver.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peri: impl Peripheral<P = T> + 'd,
         scl: impl Peripheral<P = impl SclPin<T>> + 'd,
@@ -460,9 +450,7 @@ fn operation_frames<'a, 'b: 'a>(
     let mut next_first_frame = true;
 
     Ok(iter::from_fn(move || {
-        let Some(op) = operations.next() else {
-            return None;
-        };
+        let op = operations.next()?;
 
         // Is `op` first frame of its type?
         let first_frame = next_first_frame;

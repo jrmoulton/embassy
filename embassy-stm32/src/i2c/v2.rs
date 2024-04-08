@@ -30,7 +30,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
             reg.set_anfoff(false);
         });
 
-        let timings = Timings::new(T::frequency(), freq.into());
+        let timings = Timings::new(T::frequency(), freq);
 
         T::regs().timingr().write(|reg| {
             reg.set_presc(timings.prescale);
@@ -79,7 +79,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
         };
 
         T::regs().cr2().modify(|w| {
-            w.set_sadd((address << 1 | 0) as u16);
+            w.set_sadd((address << 1) as u16);
             w.set_add10(i2c::vals::Addmode::BIT7);
             w.set_dir(i2c::vals::Dir::READ);
             w.set_nbytes(length as u8);
@@ -111,7 +111,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
         // START bit can be set even if the bus is BUSY or
         // I2C is in slave mode.
         T::regs().cr2().modify(|w| {
-            w.set_sadd((address << 1 | 0) as u16);
+            w.set_sadd((address << 1) as u16);
             w.set_add10(i2c::vals::Addmode::BIT7);
             w.set_dir(i2c::vals::Dir::WRITE);
             w.set_nbytes(length as u8);

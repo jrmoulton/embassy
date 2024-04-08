@@ -162,13 +162,13 @@ impl<'d> Crc<'d> {
     }
     /// Feeds a words into the CRC peripheral. Returns the computed checksum.
     pub fn feed_word(&mut self, word: u32) -> u32 {
-        PAC_CRC.dr32().write_value(word as u32);
-        PAC_CRC.dr32().read()
+        PAC_CRC.dr().write_value(word);
+        PAC_CRC.dr().read()
     }
     /// Feeds an slice of words into the CRC peripheral. Returns the computed checksum.
     pub fn feed_words(&mut self, words: &[u32]) -> u32 {
         for word in words {
-            PAC_CRC.dr32().write_value(*word as u32);
+            PAC_CRC.dr().write_value(*word);
         }
         PAC_CRC.dr32().read()
     }

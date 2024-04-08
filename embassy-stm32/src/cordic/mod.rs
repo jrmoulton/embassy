@@ -47,6 +47,7 @@ trait SealedInstance {
     }
 
     /// Enable global interrupt
+    #[allow(dead_code)]
     fn enable_irq(&self) {
         Self::regs().csr().modify(|v| v.set_ien(true))
     }
@@ -194,8 +195,8 @@ impl Config {
 impl<'d, T: Instance> Cordic<'d, T> {
     /// Create a Cordic driver instance
     ///
-    /// Note:  
-    /// If you need a peripheral -> CORDIC -> peripheral mode,  
+    /// Note:
+    /// If you need a peripheral -> CORDIC -> peripheral mode,
     /// you may want to set Cordic into [Mode::ZeroOverhead] mode, and add extra arguments with [Self::extra_config]
     pub fn new(peri: impl Peripheral<P = T> + 'd, config: Config) -> Self {
         T::enable_and_reset();
@@ -209,7 +210,7 @@ impl<'d, T: Instance> Cordic<'d, T> {
         instance
     }
 
-    /// Set a new config for Cordic driver  
+    /// Set a new config for Cordic driver
     pub fn set_config(&mut self, config: Config) {
         self.config = config;
         self.reconfigure();
@@ -264,11 +265,11 @@ impl<'d, T: Instance> Drop for Cordic<'d, T> {
 
 // q1.31 related
 impl<'d, T: Instance> Cordic<'d, T> {
-    /// Run a blocking CORDIC calculation in q1.31 format  
+    /// Run a blocking CORDIC calculation in q1.31 format
     ///
-    /// Notice:  
-    /// If you set `arg1_only` to `true`, please be sure ARG2 value has been set to desired value before.  
-    /// This function won't set ARG2 to +1 before or after each round of calculation.  
+    /// Notice:
+    /// If you set `arg1_only` to `true`, please be sure ARG2 value has been set to desired value before.
+    /// This function won't set ARG2 to +1 before or after each round of calculation.
     /// If you want to make sure ARG2 is set to +1, consider run [.reconfigure()](Self::reconfigure).
     pub fn blocking_calc_32bit(
         &mut self,
@@ -371,9 +372,9 @@ impl<'d, T: Instance> Cordic<'d, T> {
 
     /// Run a async CORDIC calculation in q.1.31 format
     ///
-    /// Notice:  
-    /// If you set `arg1_only` to `true`, please be sure ARG2 value has been set to desired value before.  
-    /// This function won't set ARG2 to +1 before or after each round of calculation.  
+    /// Notice:
+    /// If you set `arg1_only` to `true`, please be sure ARG2 value has been set to desired value before.
+    /// This function won't set ARG2 to +1 before or after each round of calculation.
     /// If you want to make sure ARG2 is set to +1, consider run [.reconfigure()](Self::reconfigure).
     pub async fn async_calc_32bit(
         &mut self,
@@ -466,9 +467,9 @@ impl<'d, T: Instance> Cordic<'d, T> {
 
 // q1.15 related
 impl<'d, T: Instance> Cordic<'d, T> {
-    /// Run a blocking CORDIC calculation in q1.15 format  
+    /// Run a blocking CORDIC calculation in q1.15 format
     ///
-    /// Notice::  
+    /// Notice::
     /// User will take respond to merge two u16 arguments into one u32 data, and/or split one u32 data into two u16 results.
     pub fn blocking_calc_16bit(&mut self, arg: &[u32], res: &mut [u32]) -> Result<usize, CordicError> {
         if arg.is_empty() {
@@ -512,9 +513,9 @@ impl<'d, T: Instance> Cordic<'d, T> {
         Ok(res_cnt)
     }
 
-    /// Run a async CORDIC calculation in q1.15 format  
+    /// Run a async CORDIC calculation in q1.15 format
     ///
-    /// Notice::  
+    /// Notice::
     /// User will take respond to merge two u16 arguments into one u32 data, and/or split one u32 data into two u16 results.
     pub async fn async_calc_16bit(
         &mut self,

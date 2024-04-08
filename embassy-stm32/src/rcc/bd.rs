@@ -52,10 +52,10 @@ impl From<LseDrive> for crate::pac::rcc::vals::Lsedrv {
 type Bdcr = crate::pac::rcc::regs::Bdcr;
 #[cfg(any(rtc_v2l0, rtc_v2l1))]
 type Bdcr = crate::pac::rcc::regs::Csr;
-#[cfg(any(stm32c0))]
+#[cfg(stm32c0)]
 type Bdcr = crate::pac::rcc::regs::Csr1;
 
-#[cfg(any(stm32c0))]
+#[cfg(stm32c0)]
 fn unlock() {}
 
 #[cfg(not(any(stm32c0)))]
@@ -76,7 +76,7 @@ fn bdcr() -> Reg<Bdcr, RW> {
     return crate::pac::RCC.csr();
     #[cfg(not(any(rtc_v2l0, rtc_v2l1, stm32c0)))]
     return crate::pac::RCC.bdcr();
-    #[cfg(any(stm32c0))]
+    #[cfg(stm32c0)]
     return crate::pac::RCC.csr1();
 }
 
@@ -156,7 +156,7 @@ impl LsConfig {
             let csr = crate::pac::RCC.bdcr();
             #[cfg(not(any(stm32u5, stm32h5, stm32wba, stm32c0)))]
             let csr = crate::pac::RCC.csr();
-            #[cfg(any(stm32c0))]
+            #[cfg(stm32c0)]
             let csr = crate::pac::RCC.csr2();
 
             #[cfg(not(any(rcc_wb, rcc_wba)))]

@@ -640,7 +640,7 @@ impl Default for Config {
 impl Config {
     /// Create a new config with all default values.
     pub fn new() -> Self {
-        return Default::default();
+        Default::default()
     }
 }
 
@@ -755,13 +755,14 @@ impl<'d, T: Instance, W: word::Word> Sai<'d, T, W> {
     /// Create a new SAI driver in asynchronous mode with MCLK.
     ///
     /// You can obtain the [`SubBlock`] with [`split_subblocks`].
+    #[allow(clippy::too_many_arguments)]
     pub fn new_asynchronous_with_mclk<S: SubBlockInstance>(
         peri: SubBlock<'d, T, S>,
         sck: impl Peripheral<P = impl SckPin<T, S>> + 'd,
         sd: impl Peripheral<P = impl SdPin<T, S>> + 'd,
         fs: impl Peripheral<P = impl FsPin<T, S>> + 'd,
         mclk: impl Peripheral<P = impl MclkPin<T, S>> + 'd,
-        dma: impl Peripheral<P = impl Channel + Dma<T, S>> + 'd,
+        dma: impl Peripheral<P = impl Dma<T, S>> + 'd,
         dma_buf: &'d mut [W],
         mut config: Config,
     ) -> Self {
@@ -787,7 +788,7 @@ impl<'d, T: Instance, W: word::Word> Sai<'d, T, W> {
         sck: impl Peripheral<P = impl SckPin<T, S>> + 'd,
         sd: impl Peripheral<P = impl SdPin<T, S>> + 'd,
         fs: impl Peripheral<P = impl FsPin<T, S>> + 'd,
-        dma: impl Peripheral<P = impl Channel + Dma<T, S>> + 'd,
+        dma: impl Peripheral<P = impl Dma<T, S>> + 'd,
         dma_buf: &'d mut [W],
         config: Config,
     ) -> Self {
@@ -824,7 +825,7 @@ impl<'d, T: Instance, W: word::Word> Sai<'d, T, W> {
     pub fn new_synchronous<S: SubBlockInstance>(
         peri: SubBlock<'d, T, S>,
         sd: impl Peripheral<P = impl SdPin<T, S>> + 'd,
-        dma: impl Peripheral<P = impl Channel + Dma<T, S>> + 'd,
+        dma: impl Peripheral<P = impl Dma<T, S>> + 'd,
         dma_buf: &'d mut [W],
         mut config: Config,
     ) -> Self {
@@ -853,6 +854,7 @@ impl<'d, T: Instance, W: word::Word> Sai<'d, T, W> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_inner(
         peri: impl Peripheral<P = T> + 'd,
         sub_block: WhichSubBlock,
@@ -920,7 +922,7 @@ impl<'d, T: Instance, W: word::Word> Sai<'d, T, W> {
                 w.set_comp(config.companding.comp());
                 w.set_cpl(config.complement_format.cpl());
                 w.set_muteval(config.mute_value.muteval());
-                w.set_mutecnt(config.mute_detection_counter.0 as u8);
+                w.set_mutecnt(config.mute_detection_counter.0);
                 w.set_tris(config.is_high_impedance_on_inactive_slot);
             });
 
@@ -928,20 +930,20 @@ impl<'d, T: Instance, W: word::Word> Sai<'d, T, W> {
                 w.set_fsoff(config.frame_sync_offset.fsoff());
                 w.set_fspol(config.frame_sync_polarity.fspol());
                 w.set_fsdef(config.frame_sync_definition.fsdef());
-                w.set_fsall(config.frame_sync_active_level_length.0 as u8 - 1);
+                w.set_fsall(config.frame_sync_active_level_length.0 - 1);
                 w.set_frl(config.frame_length - 1);
             });
 
             ch.slotr().modify(|w| {
-                w.set_nbslot(config.slot_count.0 as u8 - 1);
+                w.set_nbslot(config.slot_count.0 - 1);
                 w.set_slotsz(config.slot_size.slotsz());
-                w.set_fboff(config.first_bit_offset.0 as u8);
-                w.set_sloten(vals::Sloten(config.slot_enable as u16));
+                w.set_fboff(config.first_bit_offset.0);
+                w.set_sloten(vals::Sloten(config.slot_enable));
             });
 
             ch.cr1().modify(|w| w.set_saien(true));
 
-            if ch.cr1().read().saien() == false {
+            if !ch.cr1().read().saien() {
                 panic!("SAI failed to enable. Check that config is valid (frame length, slot count, etc)");
             }
         }
@@ -970,10 +972,7 @@ impl<'d, T: Instance, W: word::Word> Sai<'d, T, W> {
     }
 
     fn is_transmitter(ring_buffer: &RingBuffer<W>) -> bool {
-        match ring_buffer {
-            RingBuffer::Writable(_) => true,
-            _ => false,
-        }
+        matches!(ring_buffer, RingBuffer::Writable(_))
     }
 
     /// Reset SAI operation.
@@ -1007,7 +1006,7 @@ impl<'d, T: Instance, W: word::Word> Sai<'d, T, W> {
                 buffer.write_exact(data).await?;
                 Ok(())
             }
-            _ => return Err(Error::NotATransmitter),
+            _ => Err(Error::NotATransmitter),
         }
     }
 
@@ -1032,10 +1031,18 @@ impl<'d, T: Instance, W: word::Word> Drop for Sai<'d, T, W> {
     fn drop(&mut self) {
         let ch = T::REGS.ch(self.sub_block as usize);
         ch.cr1().modify(|w| w.set_saien(false));
-        self.fs.as_ref().map(|x| x.set_as_disconnected());
-        self.sd.as_ref().map(|x| x.set_as_disconnected());
-        self.sck.as_ref().map(|x| x.set_as_disconnected());
-        self.mclk.as_ref().map(|x| x.set_as_disconnected());
+        if let Some(x) = self.fs.as_ref() {
+            x.set_as_disconnected()
+        }
+        if let Some(x) = self.sd.as_ref() {
+            x.set_as_disconnected()
+        }
+        if let Some(x) = self.sck.as_ref() {
+            x.set_as_disconnected()
+        }
+        if let Some(x) = self.mclk.as_ref() {
+            x.set_as_disconnected()
+        }
     }
 }
 

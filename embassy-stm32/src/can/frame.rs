@@ -64,6 +64,11 @@ impl Header {
         self.len
     }
 
+    /// Return if true if is empty
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Is remote frame
     pub fn rtr(&self) -> bool {
         self.flags.get_bit(Self::FLAG_RTR)
@@ -131,10 +136,7 @@ impl ClassicData {
 
     /// Checks if the length can be encoded in FDCAN DLC field.
     pub const fn is_valid_len(len: usize) -> bool {
-        match len {
-            0..=8 => true,
-            _ => false,
-        }
+        matches!(len, 0..=8)
     }
 
     /// Creates an empty data payload containing 0 bytes.
@@ -157,7 +159,7 @@ impl Frame {
     /// Create a new CAN classic Frame
     pub fn new(can_header: Header, raw_data: &[u8]) -> Result<Self, FrameCreateError> {
         let data = ClassicData::new(raw_data)?;
-        Ok(Frame { can_header, data: data })
+        Ok(Frame { can_header, data })
     }
 
     /// Creates a new data frame.
@@ -206,7 +208,7 @@ impl Frame {
 
     /// Get reference to data
     pub fn data(&self) -> &[u8] {
-        &self.data.raw()
+        self.data.raw()
     }
 
     /// Get priority of frame
@@ -250,7 +252,7 @@ impl embedded_can::Frame for Frame {
         self.can_header.len as usize
     }
     fn data(&self) -> &[u8] {
-        &self.data.raw()
+        self.data.raw()
     }
 }
 
@@ -316,17 +318,7 @@ impl FdData {
 
     /// Checks if the length can be encoded in FDCAN DLC field.
     pub const fn is_valid_len(len: usize) -> bool {
-        match len {
-            0..=8 => true,
-            12 => true,
-            16 => true,
-            20 => true,
-            24 => true,
-            32 => true,
-            48 => true,
-            64 => true,
-            _ => false,
-        }
+        matches!(len, 0..=8 | 12 | 16 | 20 | 24 | 32 | 48 | 64)
     }
 
     /// Creates an empty data payload containing 0 bytes.
@@ -390,7 +382,7 @@ impl FdFrame {
 
     /// Get reference to data
     pub fn data(&self) -> &[u8] {
-        &self.data.raw()
+        self.data.raw()
     }
 }
 
@@ -428,7 +420,7 @@ impl embedded_can::Frame for FdFrame {
         self.can_header.len as usize
     }
     fn data(&self) -> &[u8] {
-        &self.data.raw()
+        self.data.raw()
     }
 }
 

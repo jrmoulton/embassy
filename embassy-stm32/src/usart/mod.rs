@@ -875,6 +875,7 @@ impl<'d, T: BasicInstance> Uart<'d, T, Async> {
     }
 
     /// Create a new bidirectional UART with request-to-send and clear-to-send pins
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_rtscts(
         peri: impl Peripheral<P = T> + 'd,
         rx: impl Peripheral<P = impl RxPin<T>> + 'd,
@@ -901,6 +902,7 @@ impl<'d, T: BasicInstance> Uart<'d, T, Async> {
 
     #[cfg(not(any(usart_v1, usart_v2)))]
     /// Create a new bidirectional UART with a driver-enable pin
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_de(
         peri: impl Peripheral<P = T> + 'd,
         rx: impl Peripheral<P = impl RxPin<T>> + 'd,

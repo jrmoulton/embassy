@@ -229,9 +229,9 @@ impl<'a, W: Word> ReadableDmaRingBuffer<'a, W> {
         unsafe {
             let dma_buf = self.dma_buf.as_ptr();
 
-            for i in 0..length {
-                buf[i] = core::ptr::read_volatile(dma_buf.offset((data_range.start + i) as isize));
-            }
+            buf.iter_mut().enumerate().take(length).for_each(|(i, b)| {
+                *b = core::ptr::read_volatile(dma_buf.add(data_range.start + i));
+            });
         }
 
         length
@@ -370,9 +370,9 @@ impl<'a, W: Word> WritableDmaRingBuffer<'a, W> {
         unsafe {
             let dma_buf = self.dma_buf.as_mut_ptr();
 
-            for i in 0..length {
-                core::ptr::write_volatile(dma_buf.offset((data_range.start + i) as isize), buf[i]);
-            }
+            (0..length).for_each(|i| {
+                core::ptr::write_volatile(dma_buf.add(data_range.start + i), buf[i]);
+            });
         }
 
         length
@@ -426,7 +426,7 @@ mod tests {
             }
         }
 
-        fn set_waker(&mut self, waker: &Waker) {}
+        fn set_waker(&mut self, _waker: &Waker) {}
     }
 
     impl TestCircularTransfer {

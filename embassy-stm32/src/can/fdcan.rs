@@ -1,4 +1,3 @@
-#[allow(unused_variables)]
 use core::future::poll_fn;
 use core::marker::PhantomData;
 use core::task::Poll;
@@ -44,11 +43,31 @@ impl<T: Instance> interrupt::typelevel::Handler<T::IT0Interrupt> for IT0Interrup
 
         let ir = regs.ir().read();
 
-        if ir.tc() {
-            regs.ir().write(|w| w.set_tc(true));
-        }
-        if ir.tefn() {
-            regs.ir().write(|w| w.set_tefn(true));
+        {
+            if ir.tc() {
+                regs.ir().write(|w| w.set_tc(true));
+            }
+            if ir.tefn() {
+                regs.ir().write(|w| w.set_tefn(true));
+            }
+
+            match &T::state().tx_mode {
+                TxMode::NonBuffered(waker) => waker.wake(),
+                TxMode::ClassicBuffered(buf) => {
+                    if !T::registers().tx_queue_is_full() {
+                        if let Ok(frame) = buf.tx_receiver.try_receive() {
+                            _ = T::registers().write(&frame);
+                        }
+                    }
+                }
+                TxMode::FdBuffered(buf) => {
+                    if !T::registers().tx_queue_is_full() {
+                        if let Ok(frame) = buf.tx_receiver.try_receive() {
+                            _ = T::registers().write(&frame);
+                        }
+                    }
+                }
+            }
         }
 
         match &T::state().tx_mode {
@@ -156,7 +175,7 @@ fn calc_ns_per_timer_tick<T: Instance>(mode: crate::can::fd::config::FrameTransm
             let freq = T::frequency();
             let prescale: u64 =
                 ({ T::regs().nbtp().read().nbrp() } + 1) as u64 * ({ T::regs().tscc().read().tcp() } + 1) as u64;
-            1_000_000_000 as u64 / (freq.0 as u64 * prescale)
+            1_000_000_000_u64 / (freq.0 as u64 * prescale)
         }
         // For VBR this is too hard because the FDCAN timer switches clock rate you need to configure to use
         // timer3 instead which is too hard to do from this module.
@@ -164,6 +183,7 @@ fn calc_ns_per_timer_tick<T: Instance>(mode: crate::can::fd::config::FrameTransm
     }
 }
 
+#[allow(clippy::field_reassign_with_default)]
 impl<'d, T: Instance> CanConfigurator<'d, T> {
     /// Creates a new Fdcan instance, keeping the peripheral in sleep mode.
     /// You must call [Fdcan::enable_non_blocking] to use the peripheral.
@@ -211,7 +231,7 @@ impl<'d, T: Instance> CanConfigurator<'d, T> {
 
     /// Get configuration
     pub fn config(&self) -> crate::can::fd::config::FdCanConfig {
-        return self.config;
+        self.config
     }
 
     /// Set configuration
@@ -254,13 +274,12 @@ impl<'d, T: Instance> CanConfigurator<'d, T> {
             T::mut_state().ns_per_timer_tick = ns_per_timer_tick;
         });
         T::registers().into_mode(self.config, mode);
-        let ret = Can {
+
+        Can {
             config: self.config,
             instance: self.instance,
             _mode: mode,
-            properties: self.properties,
-        };
-        ret
+        }
     }
 
     /// Start, entering mode. Does same as start(mode)
@@ -467,7 +486,7 @@ impl<'c, 'd, T: Instance, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize>
     }
 }
 
-impl<'c, 'd, T: Instance, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> Drop
+impl<'d, T: Instance, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> Drop
     for BufferedCan<'d, T, TX_BUF_SIZE, RX_BUF_SIZE>
 {
     fn drop(&mut self) {
@@ -590,7 +609,7 @@ impl<'c, 'd, T: Instance, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize>
     }
 }
 
-impl<'c, 'd, T: Instance, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> Drop
+impl<'d, T: Instance, const TX_BUF_SIZE: usize, const RX_BUF_SIZE: usize> Drop
     for BufferedCanFd<'d, T, TX_BUF_SIZE, RX_BUF_SIZE>
 {
     fn drop(&mut self) {
@@ -645,6 +664,7 @@ impl<'c, 'd, T: Instance> CanRx<'d, T> {
     }
 }
 
+#[allow(clippy::enum_variant_names)]
 enum RxMode {
     NonBuffered(AtomicWaker),
     ClassicBuffered(super::common::ClassicBufferedRxInner),
@@ -688,11 +708,8 @@ impl RxMode {
         } else if let Some((frame, ts)) = T::registers().read(1) {
             let ts = T::calc_timestamp(T::state().ns_per_timer_tick, ts);
             Some(Ok(Envelope { ts, frame }))
-        } else if let Some(err) = T::registers().curr_error() {
-            // TODO: this is probably wrong
-            Some(Err(err))
         } else {
-            None
+            T::registers().curr_error().map(Err)
         }
     }
 
@@ -704,11 +721,8 @@ impl RxMode {
         } else if let Some((frame, ts)) = T::registers().read(1) {
             let ts = T::calc_timestamp(T::state().ns_per_timer_tick, ts);
             Some(Ok(FdEnvelope { ts, frame }))
-        } else if let Some(err) = T::registers().curr_error() {
-            // TODO: this is probably wrong
-            Some(Err(err))
         } else {
-            None
+            T::registers().curr_error().map(Err)
         }
     }
 
@@ -719,11 +733,8 @@ impl RxMode {
         } else if let Some((msg, ts)) = T::registers().read(1) {
             let ts = T::calc_timestamp(T::state().ns_per_timer_tick, ts);
             Some(Ok((msg, ts)))
-        } else if let Some(err) = T::registers().curr_error() {
-            // TODO: this is probably wrong
-            Some(Err(err))
         } else {
-            None
+            T::registers().curr_error().map(Err)
         }
     }
 
@@ -754,6 +765,7 @@ impl RxMode {
     }
 }
 
+#[allow(clippy::enum_variant_names)]
 enum TxMode {
     NonBuffered(AtomicWaker),
     ClassicBuffered(super::common::ClassicBufferedTxInner),
@@ -923,7 +935,7 @@ macro_rules! impl_fdcan {
                 &crate::pac::$inst
             }
             fn registers() -> Registers {
-                Registers{regs: &crate::pac::$inst, msgram: &crate::pac::$msg_ram_inst, msg_ram_offset: Self::MSG_RAM_OFFSET}
+                Registers{regs: &crate::pac::$inst, msgram: &crate::pac::$msg_ram_inst, _msg_ram_offset: Self::MSG_RAM_OFFSET}
             }
             unsafe fn mut_state() -> &'static mut State {
                 static mut STATE: State = State::new();

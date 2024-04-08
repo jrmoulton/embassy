@@ -174,7 +174,7 @@ pub(crate) unsafe fn init(config: Config) {
             RCC.pllcfgr().write(|w| {
                 w.set_plln(pll_config.mul);
                 w.set_pllm(pll_config.prediv);
-                w.set_pllsrc(pll_config.source.into());
+                w.set_pllsrc(pll_config.source);
             });
 
             let pll_p_freq = pll_config.divp.map(|div_p| {

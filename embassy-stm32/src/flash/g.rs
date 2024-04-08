@@ -52,7 +52,7 @@ pub(crate) unsafe fn blocking_write(start_address: u32, buf: &[u8; WRITE_SIZE]) 
 }
 
 pub(crate) unsafe fn blocking_erase_sector(sector: &FlashSector) -> Result<(), Error> {
-    let idx = (sector.start - super::FLASH_BASE as u32) / super::BANK1_REGION.erase_size as u32;
+    let idx = (sector.start - super::FLASH_BASE as u32) / super::BANK1_REGION.erase_size;
     while pac::FLASH.sr().read().bsy() {}
     clear_all_err();
 

@@ -249,7 +249,7 @@ impl<'d, T: Instance> Adc<'d, T> {
 
     /// Set the ADC resolution.
     pub fn set_resolution(&mut self, resolution: Resolution) {
-        T::regs().cfgr().modify(|reg| reg.set_res(resolution.into()));
+        T::regs().cfgr().modify(|reg| reg.set_res(resolution));
     }
 
     /// Perform a single conversion.
@@ -308,7 +308,6 @@ impl<'d, T: Instance> Adc<'d, T> {
     }
 
     fn set_channel_sample_time(ch: u8, sample_time: SampleTime) {
-        let sample_time = sample_time.into();
         if ch <= 9 {
             T::regs().smpr(0).modify(|reg| reg.set_smp(ch as _, sample_time));
         } else {

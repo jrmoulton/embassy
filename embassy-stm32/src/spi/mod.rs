@@ -217,6 +217,7 @@ impl<'d, T: Instance, M: PeriMode> Spi<'d, T, M> {
     }
 
     /// Reconfigures it with the supplied config.
+    #[allow(clippy::result_unit_err)]
     pub fn set_config(&mut self, config: &Config) -> Result<(), ()> {
         let cpha = config.raw_phase();
         let cpol = config.raw_polarity();
@@ -725,9 +726,15 @@ impl<'d, T: Instance> Spi<'d, T, Async> {
 
 impl<'d, T: Instance, M: PeriMode> Drop for Spi<'d, T, M> {
     fn drop(&mut self) {
-        self.sck.as_ref().map(|x| x.set_as_disconnected());
-        self.mosi.as_ref().map(|x| x.set_as_disconnected());
-        self.miso.as_ref().map(|x| x.set_as_disconnected());
+        if let Some(x) = self.sck.as_ref() {
+            x.set_as_disconnected()
+        }
+        if let Some(x) = self.mosi.as_ref() {
+            x.set_as_disconnected()
+        }
+        if let Some(x) = self.miso.as_ref() {
+            x.set_as_disconnected()
+        }
 
         T::disable();
     }

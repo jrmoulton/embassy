@@ -243,6 +243,7 @@ pub(crate) struct ChannelState {
     complete_count: AtomicUsize,
 }
 
+#[allow(clippy::declare_interior_mutable_const)]
 impl ChannelState {
     pub(crate) const NEW: Self = Self {
         waker: AtomicWaker::new(),
@@ -329,6 +330,7 @@ impl AnyChannel {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     unsafe fn configure(
         &self,
         _request: Request,
@@ -545,6 +547,8 @@ pub struct Transfer<'a> {
 
 impl<'a> Transfer<'a> {
     /// Create a new read DMA transfer (peripheral to memory).
+    /// # Safety
+    /// The caller must ensure that the buffer is valid for the duration of the transfer.
     pub unsafe fn new_read<W: Word>(
         channel: impl Peripheral<P = impl Channel> + 'a,
         request: Request,
@@ -556,6 +560,8 @@ impl<'a> Transfer<'a> {
     }
 
     /// Create a new read DMA transfer (peripheral to memory), using raw pointers.
+    /// # Safety
+    /// The caller must ensure that the buffer is valid for the duration of the transfer.
     pub unsafe fn new_read_raw<W: Word>(
         channel: impl Peripheral<P = impl Channel> + 'a,
         request: Request,
@@ -582,6 +588,8 @@ impl<'a> Transfer<'a> {
     }
 
     /// Create a new write DMA transfer (memory to peripheral).
+    /// # Safety
+    /// The caller must ensure that the buffer is valid for the duration of the transfer.
     pub unsafe fn new_write<W: Word>(
         channel: impl Peripheral<P = impl Channel> + 'a,
         request: Request,
@@ -593,6 +601,8 @@ impl<'a> Transfer<'a> {
     }
 
     /// Create a new write DMA transfer (memory to peripheral), using raw pointers.
+    /// # Safety
+    /// The caller must ensure that the buffer is valid for the duration of the transfer.
     pub unsafe fn new_write_raw<W: Word>(
         channel: impl Peripheral<P = impl Channel> + 'a,
         request: Request,
@@ -619,6 +629,8 @@ impl<'a> Transfer<'a> {
     }
 
     /// Create a new write DMA transfer (memory to peripheral), writing the same value repeatedly.
+    /// # Safety
+    /// The caller must ensure that the buffer is valid for the duration of the transfer.
     pub unsafe fn new_write_repeated<W: Word>(
         channel: impl Peripheral<P = impl Channel> + 'a,
         request: Request,
@@ -642,6 +654,7 @@ impl<'a> Transfer<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     unsafe fn new_inner(
         channel: PeripheralRef<'a, AnyChannel>,
         _request: Request,
@@ -757,6 +770,8 @@ pub struct ReadableRingBuffer<'a, W: Word> {
 
 impl<'a, W: Word> ReadableRingBuffer<'a, W> {
     /// Create a new ring buffer.
+    /// # Safety
+    /// The caller must ensure that the buffer is valid for the duration of the transfer.
     pub unsafe fn new(
         channel: impl Peripheral<P = impl Channel> + 'a,
         _request: Request,
@@ -893,6 +908,7 @@ pub struct WritableRingBuffer<'a, W: Word> {
 
 impl<'a, W: Word> WritableRingBuffer<'a, W> {
     /// Create a new ring buffer.
+    #[allow(clippy::missing_safety_doc)]
     pub unsafe fn new(
         channel: impl Peripheral<P = impl Channel> + 'a,
         _request: Request,

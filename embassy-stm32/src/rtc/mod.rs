@@ -191,6 +191,7 @@ impl Default for RtcConfig {
 /// Calibration cycle period.
 #[derive(Default, Copy, Clone, Debug, PartialEq)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum RtcCalibrationCyclePeriod {
     /// 8-second calibration period
     Seconds8,
@@ -416,11 +417,11 @@ impl Rtc {
                 #[cfg(any(rtc_v3, rtc_v3u5, rtc_v3l5))]
                 regs.scr().write(|w| w.set_cwutf(Calrf::CLEAR));
 
-                // Check RM for EXTI and/or NVIC section, "Event event input mapping" or "EXTI interrupt/event mapping" or something similar,
-                // there is a table for every "Event input" / "EXTI Line".
-                // If you find the EXTI line related to "RTC wakeup" marks as "Configurable" (not "Direct"),
-                // then write 1 to related field of Pending Register, to clean it's pending state.
-                #[cfg(any(exti_v1, stm32h7, stm32wb))]
+                #[cfg(stm32g0)]
+                crate::pac::EXTI
+                    .rpr(0)
+                    .modify(|w| w.set_line(RTC::EXTI_WAKEUP_LINE, true));
+                #[cfg(all(not(stm32g0), not(stm32l5)))]
                 crate::pac::EXTI
                     .pr(0)
                     .modify(|w| w.set_line(RTC::EXTI_WAKEUP_LINE, true));

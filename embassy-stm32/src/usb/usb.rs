@@ -117,6 +117,7 @@ const USBRAM_ALIGN: usize = 2;
 #[cfg(any(usbram_32_2048, usbram_32_1024))]
 const USBRAM_ALIGN: usize = 4;
 
+#[allow(clippy::declare_interior_mutable_const)]
 const NEW_AW: AtomicWaker = AtomicWaker::new();
 static BUS_WAKER: AtomicWaker = NEW_AW;
 static EP0_SETUP: AtomicBool = AtomicBool::new(false);
@@ -153,7 +154,7 @@ fn align_len_up(len: u16) -> u16 {
 fn calc_out_len(len: u16) -> (u16, u16) {
     match len {
         // NOTE: this could be 2..=62 with 16bit USBRAM, but not with 32bit. Limit it to 60 for simplicity.
-        2..=60 => (align_len_up(len), align_len_up(len) / 2 << 10),
+        2..=60 => (align_len_up(len), (align_len_up(len) / 2) << 10),
         61..=1024 => ((len + 31) / 32 * 32, (((len + 31) / 32 - 1) << 10) | 0x8000),
         _ => panic!("invalid OUT length {}", len),
     }
@@ -163,20 +164,20 @@ fn calc_out_len(len: u16) -> (u16, u16) {
 mod btable {
     use super::*;
 
-    pub(super) fn write_in<T: Instance>(index: usize, addr: u16) {
-        USBRAM.mem(index * 4 + 0).write_value(addr);
+    pub(super) fn write_in(index: usize, addr: u16) {
+        USBRAM.mem(index * 4).write_value(addr);
     }
 
-    pub(super) fn write_in_len<T: Instance>(index: usize, _addr: u16, len: u16) {
+    pub(super) fn write_in_len(index: usize, _addr: u16, len: u16) {
         USBRAM.mem(index * 4 + 1).write_value(len);
     }
 
-    pub(super) fn write_out<T: Instance>(index: usize, addr: u16, max_len_bits: u16) {
+    pub(super) fn write_out(index: usize, addr: u16, max_len_bits: u16) {
         USBRAM.mem(index * 4 + 2).write_value(addr);
         USBRAM.mem(index * 4 + 3).write_value(max_len_bits);
     }
 
-    pub(super) fn read_out_len<T: Instance>(index: usize) -> u16 {
+    pub(super) fn read_out_len(index: usize) -> u16 {
         USBRAM.mem(index * 4 + 3).read()
     }
 }
@@ -349,7 +350,7 @@ impl<'d, T: Instance> Driver<'d, T> {
                 let addr = self.alloc_ep_mem(len);
 
                 trace!("  len_bits = {:04x}", len_bits);
-                btable::write_out::<T>(index, addr, len_bits);
+                btable::write_out(index, addr, len_bits);
 
                 EndpointBuffer {
                     addr,
@@ -365,7 +366,7 @@ impl<'d, T: Instance> Driver<'d, T> {
                 let addr = self.alloc_ep_mem(len);
 
                 // ep_in_len is written when actually TXing packets.
-                btable::write_in::<T>(index, addr);
+                btable::write_in(index, addr);
 
                 EndpointBuffer {
                     addr,
@@ -666,12 +667,12 @@ impl<'d, T: Instance, D> Endpoint<'d, T, D> {
     fn write_data(&mut self, buf: &[u8]) {
         let index = self.info.addr.index();
         self.buf.write(buf);
-        btable::write_in_len::<T>(index, self.buf.addr, buf.len() as _);
+        btable::write_in_len(index, self.buf.addr, buf.len() as _);
     }
 
     fn read_data(&mut self, buf: &mut [u8]) -> Result<usize, EndpointError> {
         let index = self.info.addr.index();
-        let rx_len = btable::read_out_len::<T>(index) as usize & 0x3FF;
+        let rx_len = btable::read_out_len(index) as usize & 0x3FF;
         trace!("READ DONE, rx_len = {}", rx_len);
         if rx_len > buf.len() {
             return Err(EndpointError::BufferOverflow);

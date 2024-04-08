@@ -85,6 +85,7 @@ pub struct Qspi<'d, T: Instance, Dma> {
 
 impl<'d, T: Instance, Dma> Qspi<'d, T, Dma> {
     /// Create a new QSPI driver for bank 1.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_bk1(
         peri: impl Peripheral<P = T> + 'd,
         d0: impl Peripheral<P = impl BK1D0Pin<T>> + 'd,
@@ -126,6 +127,7 @@ impl<'d, T: Instance, Dma> Qspi<'d, T, Dma> {
     }
 
     /// Create a new QSPI driver for bank 2.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_bk2(
         peri: impl Peripheral<P = T> + 'd,
         d0: impl Peripheral<P = impl BK2D0Pin<T>> + 'd,
@@ -166,6 +168,7 @@ impl<'d, T: Instance, Dma> Qspi<'d, T, Dma> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_inner(
         peri: impl Peripheral<P = T> + 'd,
         d0: Option<PeripheralRef<'d, AnyPin>>,

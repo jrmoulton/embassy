@@ -1,3 +1,4 @@
+#![allow(clippy::empty_docs)]
 //! Configuration for FDCAN Module
 // Note: This file is copied and modified from fdcan crate by Richard Meadows
 

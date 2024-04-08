@@ -59,7 +59,7 @@ pub fn calc_can_timings(periph_clock: crate::time::Hertz, can_bitrate: u32) -> O
     }
 
     let prescaler = prescaler_bs / (1 + bs1_bs2_sum) as u32;
-    if (prescaler < 1) || (prescaler > 1024) {
+    if !(1..=1024).contains(&prescaler) {
         return None; // No solution
     }
 
@@ -92,7 +92,7 @@ pub fn calc_can_timings(periph_clock: crate::time::Hertz, can_bitrate: u32) -> O
     }
 
     // Check is BS1 and BS2 are in range
-    if (bs1 < 1) || (bs1 > BS1_MAX) || (bs2 < 1) || (bs2 > BS2_MAX) {
+    if !(1..=BS1_MAX).contains(&bs1) || !(1..=BS2_MAX).contains(&bs2) {
         return None;
     }
 
