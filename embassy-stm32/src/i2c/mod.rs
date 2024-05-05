@@ -13,6 +13,7 @@ use embassy_hal_internal::{into_ref, Peripheral, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 #[cfg(feature = "time")]
 use embassy_time::{Duration, Instant};
+use stm32_metapac::i2c::vals::Oamsk;
 
 use crate::dma::ChannelAndRequest;
 use crate::gpio::{AFType, Pull};
@@ -37,6 +38,10 @@ pub enum Error {
     Crc,
     /// Overrun error
     Overrun,
+    // Underun error
+    Underun,
+    // PEC error
+    Pec,
     /// Zero-length transfers are not allowed.
     ZeroLengthTransfer,
 }
@@ -147,6 +152,172 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
         };
 
         this.init(freq, config);
+
+        this
+    }
+
+    fn timeout(&self) -> Timeout {
+        Timeout {
+            #[cfg(feature = "time")]
+            deadline: Instant::now() + self.timeout,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendStatus {
+    Done,
+    LeftoverBytes(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiveStatus {
+    // contains the number of bytes received
+    Done(usize),
+    // contains the number of bytes received
+    SendRequested(usize),
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum AddrMask {
+    NOMASK,
+    MASK1,
+    MASK2,
+    MASK3,
+    MASK4,
+    MASK5,
+    MASK6,
+    MASK7,
+}
+impl From<AddrMask> for Oamsk {
+    fn from(value: AddrMask) -> Self {
+        match value {
+            AddrMask::NOMASK => Oamsk::NOMASK,
+            AddrMask::MASK1 => Oamsk::MASK1,
+            AddrMask::MASK2 => Oamsk::MASK2,
+            AddrMask::MASK3 => Oamsk::MASK3,
+            AddrMask::MASK4 => Oamsk::MASK4,
+            AddrMask::MASK5 => Oamsk::MASK5,
+            AddrMask::MASK6 => Oamsk::MASK6,
+            AddrMask::MASK7 => Oamsk::MASK7,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum OwnAddress {
+    SevenBit(u8),
+    TenBit(u16),
+}
+impl OwnAddress {
+    fn add_mode(&self) -> stm32_metapac::i2c::vals::Addmode {
+        match self {
+            OwnAddress::SevenBit(_) => stm32_metapac::i2c::vals::Addmode::BIT7,
+            OwnAddress::TenBit(_) => stm32_metapac::i2c::vals::Addmode::BIT10,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct OA2 {
+    addr: u8,
+    /// must be a value from 1 to 6
+    mask: AddrMask,
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum OwnAddresses {
+    OA1(OwnAddress),
+    OA2(OA2),
+    Both { oa1: OwnAddress, oa2: OA2 },
+}
+
+/// Slave Configuration
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct SlaveConfig {
+    /// Target Address(es)
+    pub addr: OwnAddresses,
+    /// Control if the peripheral should ack to and report general calls.
+    pub general_call: bool,
+
+    #[cfg(feature = "time")]
+    pub timeout: embassy_time::Duration,
+}
+
+impl Default for SlaveConfig {
+    fn default() -> Self {
+        Self {
+            addr: OwnAddresses::OA1(OwnAddress::SevenBit(0x55)),
+            general_call: true,
+            #[cfg(feature = "time")]
+            timeout: Default::default(),
+        }
+    }
+}
+/// Received command
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum CommandKind {
+    /// Read
+    SlaveSend,
+    /// Slave is receiving data
+    SlaveReceive,
+}
+
+pub struct Command {
+    pub kind: CommandKind,
+    pub address: OwnAddress,
+}
+
+/// I2CSlave driver
+pub struct I2cSlave<'d, T: Instance, TXDMA = NoDma, RXDMA = NoDma> {
+    _peri: PeripheralRef<'d, T>,
+    #[allow(dead_code)]
+    tx_dma: PeripheralRef<'d, TXDMA>,
+    #[allow(dead_code)]
+    rx_dma: PeripheralRef<'d, RXDMA>,
+    #[cfg(feature = "time")]
+    timeout: Duration,
+}
+
+impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
+    /// Create a new I2C Slave driver.
+    pub fn new(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        _irq: impl interrupt::typelevel::Binding<T::EventInterrupt, EventInterruptHandler<T>>
+            + interrupt::typelevel::Binding<T::ErrorInterrupt, ErrorInterruptHandler<T>>
+            + 'd,
+        tx_dma: impl Peripheral<P = TXDMA> + 'd,
+        rx_dma: impl Peripheral<P = RXDMA> + 'd,
+        config: SlaveConfig,
+    ) -> Self {
+        into_ref!(peri, scl, sda, tx_dma, rx_dma);
+
+        T::enable_and_reset();
+
+        scl.set_as_af_pull(scl.af_num(), AFType::OutputOpenDrain, Pull::None);
+        sda.set_as_af_pull(sda.af_num(), AFType::OutputOpenDrain, Pull::None);
+
+        let mut this = Self {
+            _peri: peri,
+            tx_dma,
+            rx_dma,
+            #[cfg(feature = "time")]
+            timeout: config.timeout,
+        };
+
+        this.init(config);
+
+        unsafe { T::EventInterrupt::enable() };
+        unsafe { T::ErrorInterrupt::enable() };
 
         this
     }
@@ -303,6 +474,8 @@ impl embedded_hal_1::i2c::Error for Error {
             Self::Timeout => embedded_hal_1::i2c::ErrorKind::Other,
             Self::Crc => embedded_hal_1::i2c::ErrorKind::Other,
             Self::Overrun => embedded_hal_1::i2c::ErrorKind::Overrun,
+            Self::Underun => embedded_hal_1::i2c::ErrorKind::Other,
+            Self::Pec => embedded_hal_1::i2c::ErrorKind::Other,
             Self::ZeroLengthTransfer => embedded_hal_1::i2c::ErrorKind::Other,
         }
     }
