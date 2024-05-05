@@ -1,5 +1,8 @@
 //! Inter-Integrated-Circuit (I2C)
 #![macro_use]
+#![allow(missing_docs)]
+#![allow(dead_code)]
+#![allow(unused)]
 
 #[cfg_attr(i2c_v1, path = "v1.rs")]
 #[cfg_attr(any(i2c_v2, i2c_v3), path = "v2.rs")]
