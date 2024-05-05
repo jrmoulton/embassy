@@ -1,6 +1,4 @@
 // Note: This file is copied and modified from fdcan crate by Richard Meadows
-//
-#![allow(clippy::mut_from_ref)]
 
 use core::convert::Infallible;
 use core::slice;
@@ -24,7 +22,7 @@ enum LoopbackMode {
 pub struct Registers {
     pub regs: &'static crate::pac::can::Fdcan,
     pub msgram: &'static crate::pac::fdcanram::Fdcanram,
-    pub _msg_ram_offset: usize,
+    pub msg_ram_offset: usize,
 }
 
 impl Registers {
@@ -172,7 +170,7 @@ impl Registers {
             loop {
                 if can.txbcf().read().cf(bufidx) {
                     // Return false when a transmission has occured
-                    break !can.txbto().read().to(bufidx);
+                    break can.txbto().read().to(bufidx) == false;
                 }
             }
         } else {
@@ -253,7 +251,7 @@ impl Registers {
     #[inline]
     fn enter_init_mode(&mut self) {
         self.regs.cccr().modify(|w| w.set_init(true));
-        while !self.regs.cccr().read().init() {}
+        while false == self.regs.cccr().read().init() {}
         self.regs.cccr().modify(|w| w.set_cce(true));
     }
 
@@ -395,7 +393,7 @@ impl Registers {
 
         self.regs.cccr().modify(|w| w.set_cce(false));
         self.regs.cccr().modify(|w| w.set_init(false));
-        while self.regs.cccr().read().init() {}
+        while self.regs.cccr().read().init() == true {}
     }
 
     /// Moves out of ConfigMode and into specified mode
@@ -656,7 +654,7 @@ fn put_tx_header(mailbox: &mut TxBufferElement, header: &Header) {
     let (id, id_type) = match header.id() {
         // A standard identifier has to be written to ID[28:18].
         embedded_can::Id::Standard(id) => ((id.as_raw() as u32) << 18, IdType::StandardId),
-        embedded_can::Id::Extended(id) => (id.as_raw(), IdType::ExtendedId),
+        embedded_can::Id::Extended(id) => (id.as_raw() as u32, IdType::ExtendedId),
     };
 
     // Use FDCAN only for DLC > 8. FDCAN users can revise this if required.
@@ -670,7 +668,7 @@ fn put_tx_header(mailbox: &mut TxBufferElement, header: &Header) {
     mailbox.header.write(|w| {
         unsafe { w.id().bits(id) }
             .rtr()
-            .bit(header.is_empty() && header.rtr())
+            .bit(header.len() == 0 && header.rtr())
             .xtd()
             .set_id_type(id_type)
             .set_len(DataLength::new(header.len(), frame_format))

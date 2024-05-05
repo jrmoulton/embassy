@@ -6,7 +6,6 @@ use cortex_m::asm::nop;
 use embassy_embedded_hal::SetConfig;
 use embassy_hal_internal::drop::OnDrop;
 use embedded_hal_1::i2c::Operation;
-use futures::FutureExt as _;
 use stm32_metapac::i2c::vals::Addmode;
 
 use super::*;
@@ -809,7 +808,7 @@ impl<'d, T: Instance, M: Mode> SetConfig for I2c<'d, T, M> {
     }
 }
 
-impl<'d, T: Instance> SetConfig for I2cSlave<'d, T> {
+impl<'d, T: Instance, M: Mode> SetConfig for I2cSlave<'d, T, M> {
     type Config = Hertz;
     type ConfigError = ();
     fn set_config(&mut self, config: &Self::Config) -> Result<(), ()> {
@@ -825,7 +824,7 @@ impl<'d, T: Instance> SetConfig for I2cSlave<'d, T> {
 }
 
 // I2cSlave methods
-impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
+impl<'d, T: Instance, M: Mode> I2cSlave<'d, T, M> {
     pub(crate) fn init(&mut self, config: SlaveConfig) {
         T::regs().cr1().modify(|reg| {
             reg.set_pe(false);
@@ -896,16 +895,22 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
         T::regs().icr().write(|reg| reg.addrcf());
         T::regs().cr1().modify(|reg| {
             reg.set_addrie(true);
+            reg.set_txie(true);
+            reg.set_wupen(true);
         });
+
 
         poll_fn(|cx| {
             state.waker.register(cx.waker());
             let isr = T::regs().isr().read();
             let cr1 = T::regs().cr1().read().pe();
+            let wupen = T::regs().cr1().read().wupen();
             #[cfg(feature = "defmt")]
             defmt::debug!("{}", isr.0);
             #[cfg(feature = "defmt")]
             defmt::debug!("Periph enabled: {}", cr1);
+            #[cfg(feature = "defmt")]
+            defmt::debug!("wupen enabled: {}", wupen);
             if !isr.addr() {
                 #[cfg(feature = "defmt")]
                 defmt::warn!("slave returning poll pending");
@@ -932,46 +937,8 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
         .await
     }
 
-    pub async fn respond_to_receive(&mut self, buffer: &mut [u8]) -> Result<ReceiveStatus, Error>
-    where
-        RXDMA: crate::i2c::RxDma<T>,
-    {
-        let timeout = self.timeout();
-        let size = timeout.with(self.read_dma_internal(buffer, timeout)).await?;
-
-        let isr = T::regs().isr().read();
-
-        if isr.addr() {
-            if isr.dir() == i2c::vals::Dir::READ {
-                return Ok(ReceiveStatus::SendRequested(size));
-            }
-        }
-        Ok(ReceiveStatus::Done(size))
-    }
-
-    pub async fn respond_to_send(&mut self, buffer: &[u8]) -> Result<SendStatus, Error>
-    where
-        TXDMA: crate::i2c::TxDma<T>,
-    {
-        let timeout = self.timeout();
-        timeout.with(self.write_dma_internal(buffer, timeout, false)).await
-    }
-
-    pub async fn respond_and_fill(&mut self, buffer: &[u8], fill: u8) -> Result<SendStatus, Error>
-    where
-        TXDMA: crate::i2c::TxDma<T>,
-    {
-        let resp_stat = self.respond_to_send(buffer).await?;
-
-        // if resp_stat == SendStatus::NeedMoreBytes {
-        //     self.write_dma_internal(&[fill], self.timeout(), true).await?;
-        //     Ok(SendStatus::Done)
-        // } else {
-        Ok(resp_stat)
-        // }
-    }
-
     fn determine_matched_address(&self) -> Result<OwnAddress, Error> {
+        #[cfg(feature = "defmt")]
         defmt::warn!("determining matched address");
         let matched = T::regs().isr().read().addcode();
         let address = if matched >> 3 == 0b11110 {
@@ -989,11 +956,49 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
         address
     }
 
+    fn blocking_read(buffer: &mut [u8], timeout: Timeout) -> Result<(), Error> {
+        for byte in buffer.iter_mut() {
+            while !T::regs().isr().read().rxne() {
+                timeout.check()?;
+            }
+            *byte = T::regs().rxdr().read().rxdata();
+        }
+        Ok(())
+    }
+}
+
+impl<'d, T: Instance> I2cSlave<'d, T, Async> {
+    pub async fn respond_to_receive(&mut self, buffer: &mut [u8]) -> Result<ReceiveStatus, Error> {
+        let timeout = self.timeout();
+        let size = timeout.with(self.read_dma_internal(buffer, timeout)).await?;
+
+        let isr = T::regs().isr().read();
+
+        if isr.addr() {
+            if isr.dir() == i2c::vals::Dir::READ {
+                return Ok(ReceiveStatus::SendRequested(size));
+            }
+        }
+        Ok(ReceiveStatus::Done(size))
+    }
+
+    pub async fn respond_to_send(&mut self, buffer: &[u8]) -> Result<SendStatus, Error> {
+        let timeout = self.timeout();
+        timeout.with(self.write_dma_internal(buffer, timeout, false)).await
+    }
+
+    pub async fn respond_and_fill(&mut self, buffer: &[u8], fill: u8) -> Result<SendStatus, Error> {
+        let resp_stat = self.respond_to_send(buffer).await?;
+
+        // if resp_stat == SendStatus::NeedMoreBytes {
+        //     self.write_dma_internal(&[fill], self.timeout(), true).await?;
+        //     Ok(SendStatus::Done)
+        // } else {
+        Ok(resp_stat)
+        // }
+    }
     // for data reception in slave mode
-    async fn read_dma_internal(&mut self, buffer: &mut [u8], timeout: Timeout) -> Result<usize, Error>
-    where
-        RXDMA: crate::i2c::RxDma<T>,
-    {
+    async fn read_dma_internal(&mut self, buffer: &mut [u8], timeout: Timeout) -> Result<usize, Error> {
         let total_len = buffer.len();
 
         let mut dma_transfer = unsafe {
@@ -1003,17 +1008,13 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
                 w.set_stopie(true);
                 w.set_errie(true);
             });
-            // regs.cr2().modify(|w| {
-            //     w.set_nbytes(total_len as u8);
-            // });
             let src = regs.rxdr().as_ptr() as *mut u8;
 
-            let ch = &mut self.rx_dma;
-            let request = ch.request();
-            Transfer::new_read(ch, request, src, buffer, Default::default())
+            self.rx_dma.as_mut().unwrap().read(src, buffer, Default::default())
         };
 
         let state = T::state();
+        let mut remaining_len = total_len;
 
         let on_drop = OnDrop::new(|| {
             let regs = T::regs();
@@ -1057,23 +1058,14 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
 
         Ok(total_received)
     }
-
-    fn blocking_read(buffer: &mut [u8], timeout: Timeout) -> Result<(), Error> {
-        for byte in buffer.iter_mut() {
-            while !T::regs().isr().read().rxne() {
-                timeout.check()?;
-            }
-            *byte = T::regs().rxdr().read().rxdata();
-        }
-        Ok(())
-    }
-
     // writing dma (mem -> peripheral) is for responding to an I2C slave read request
     // setting circular to true is used to write a single byte until the stop condition
-    async fn write_dma_internal(&mut self, buffer: &[u8], timeout: Timeout, circular: bool) -> Result<SendStatus, Error>
-    where
-        TXDMA: crate::i2c::TxDma<T>,
-    {
+    async fn write_dma_internal(
+        &mut self,
+        buffer: &[u8],
+        timeout: Timeout,
+        circular: bool,
+    ) -> Result<SendStatus, Error> {
         let total_len = buffer.len();
 
         let mut dma_transfer = unsafe {
@@ -1083,21 +1075,17 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
                 w.set_stopie(true);
                 w.set_errie(true);
             });
-            regs.cr2().modify(|w| {
-                w.set_nbytes(total_len as u8);
-            });
             let dst = regs.txdr().as_ptr() as *mut u8;
 
-            let ch = &mut self.tx_dma;
-            let request = ch.request();
             let transfer_options = TransferOptions {
                 circular,
                 ..Default::default()
             };
-            Transfer::new_write(ch, request, buffer, dst, transfer_options)
+            self.tx_dma.as_mut().unwrap().write(buffer, dst, transfer_options)
         };
 
         let state = T::state();
+        let mut remaining_len = total_len;
 
         let on_drop = OnDrop::new(|| {
             let regs = T::regs();

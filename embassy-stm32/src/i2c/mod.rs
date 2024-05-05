@@ -279,17 +279,16 @@ pub struct Command {
 }
 
 /// I2CSlave driver
-pub struct I2cSlave<'d, T: Instance, TXDMA = NoDma, RXDMA = NoDma> {
+pub struct I2cSlave<'d, T: Instance, M: Mode> {
     _peri: PeripheralRef<'d, T>,
-    #[allow(dead_code)]
-    tx_dma: PeripheralRef<'d, TXDMA>,
-    #[allow(dead_code)]
-    rx_dma: PeripheralRef<'d, RXDMA>,
+    tx_dma: Option<ChannelAndRequest<'d>>,
+    rx_dma: Option<ChannelAndRequest<'d>>,
     #[cfg(feature = "time")]
     timeout: Duration,
+    _phantom: PhantomData<M>,
 }
 
-impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
+impl<'d, T: Instance> I2cSlave<'d, T, Async> {
     /// Create a new I2C Slave driver.
     pub fn new(
         peri: impl Peripheral<P = T> + 'd,
@@ -298,16 +297,43 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
         _irq: impl interrupt::typelevel::Binding<T::EventInterrupt, EventInterruptHandler<T>>
             + interrupt::typelevel::Binding<T::ErrorInterrupt, ErrorInterruptHandler<T>>
             + 'd,
-        tx_dma: impl Peripheral<P = TXDMA> + 'd,
-        rx_dma: impl Peripheral<P = RXDMA> + 'd,
+        tx_dma: impl Peripheral<P = impl TxDma<T>> + 'd,
+        rx_dma: impl Peripheral<P = impl RxDma<T>> + 'd,
         config: SlaveConfig,
     ) -> Self {
-        into_ref!(peri, scl, sda, tx_dma, rx_dma);
+        Self::new_inner(peri, scl, sda, new_dma!(tx_dma), new_dma!(rx_dma), config)
+    }
+}
+
+impl<'d, T: Instance> I2cSlave<'d, T, Blocking> {
+    pub fn new_blocking(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        config: SlaveConfig,
+    ) -> Self {
+        Self::new_inner(peri, scl, sda, None, None, config)
+    }
+}
+impl<'d, T: Instance, M: Mode> I2cSlave<'d, T, M> {
+    /// Create a new I2C driver.
+    fn new_inner(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        tx_dma: Option<ChannelAndRequest<'d>>,
+        rx_dma: Option<ChannelAndRequest<'d>>,
+        config: SlaveConfig,
+    ) -> Self {
+        into_ref!(peri, scl, sda);
 
         T::enable_and_reset();
 
         scl.set_as_af_pull(scl.af_num(), AFType::OutputOpenDrain, Pull::None);
         sda.set_as_af_pull(sda.af_num(), AFType::OutputOpenDrain, Pull::None);
+
+        unsafe { T::EventInterrupt::enable() };
+        unsafe { T::ErrorInterrupt::enable() };
 
         let mut this = Self {
             _peri: peri,
@@ -315,12 +341,10 @@ impl<'d, T: Instance, TXDMA, RXDMA> I2cSlave<'d, T, TXDMA, RXDMA> {
             rx_dma,
             #[cfg(feature = "time")]
             timeout: config.timeout,
+            _phantom: PhantomData,
         };
 
         this.init(config);
-
-        unsafe { T::EventInterrupt::enable() };
-        unsafe { T::ErrorInterrupt::enable() };
 
         this
     }

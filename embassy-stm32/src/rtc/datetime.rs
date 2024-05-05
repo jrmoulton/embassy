@@ -7,7 +7,6 @@ use crate::peripherals::RTC;
 use crate::rtc::SealedInstance;
 
 /// Represents an instant in time that can be substracted to compute a duration
-#[allow(dead_code)]
 pub struct RtcInstant {
     /// 0..59
     pub second: u8,
@@ -84,7 +83,6 @@ pub enum Error {
 }
 
 /// Structure containing date and time information
-#[allow(clippy::empty_docs)]
 pub struct DateTime {
     /// 0..4095
     year: u16,

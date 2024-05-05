@@ -6,6 +6,8 @@ use core::task::Poll;
 
 use embassy_embedded_hal::SetConfig;
 use embassy_hal_internal::atomic_ring_buffer::RingBuffer;
+use embassy_hal_internal::{into_ref, Peripheral};
+use embassy_sync::waitqueue::AtomicWaker;
 
 #[cfg(not(any(usart_v1, usart_v2)))]
 use super::DePin;
@@ -104,7 +106,7 @@ impl<T: BasicInstance> interrupt::typelevel::Handler<T::Interrupt> for Interrupt
                     });
                 }
 
-                tdr(r).write_volatile(buf[0]);
+                tdr(r).write_volatile(buf[0].into());
                 tx_reader.pop_done(1);
             } else {
                 // Disable interrupt until we have something to transmit again.
@@ -203,7 +205,6 @@ impl<'d, T: BasicInstance> BufferedUart<'d, T> {
     }
 
     /// Create a new bidirectional buffered UART driver with request-to-send and clear-to-send pins
-    #[allow(clippy::too_many_arguments)]
     pub fn new_with_rtscts(
         peri: impl Peripheral<P = T> + 'd,
         _irq: impl interrupt::typelevel::Binding<T::Interrupt, InterruptHandler<T>> + 'd,
@@ -232,7 +233,6 @@ impl<'d, T: BasicInstance> BufferedUart<'d, T> {
     }
 
     /// Create a new bidirectional buffered UART driver with a driver-enable pin
-    #[allow(clippy::too_many_arguments)]
     #[cfg(not(any(usart_v1, usart_v2)))]
     pub fn new_with_de(
         peri: impl Peripheral<P = T> + 'd,
@@ -493,7 +493,7 @@ impl<'d, T: BasicInstance> Drop for BufferedUartRx<'d, T> {
 
             // TX is inactive if the the buffer is not available.
             // We can now unregister the interrupt handler
-            if state.tx_buf.is_empty() {
+            if state.tx_buf.len() == 0 {
                 T::Interrupt::disable();
             }
         }
@@ -510,7 +510,7 @@ impl<'d, T: BasicInstance> Drop for BufferedUartTx<'d, T> {
 
             // RX is inactive if the the buffer is not available.
             // We can now unregister the interrupt handler
-            if state.rx_buf.is_empty() {
+            if state.rx_buf.len() == 0 {
                 T::Interrupt::disable();
             }
         }
