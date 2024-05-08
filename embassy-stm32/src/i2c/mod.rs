@@ -171,6 +171,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
 pub enum SendStatus {
     Done,
     LeftoverBytes(usize),
+    MoreBytesRequested,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +180,22 @@ pub enum ReceiveStatus {
     Done(usize),
     // contains the number of bytes received
     SendRequested(usize),
+}
+impl ReceiveStatus {
+    pub fn len(&self) -> usize {
+        match self {
+            ReceiveStatus::Done(n) => *n,
+            ReceiveStatus::SendRequested(n) => *n,
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        matches!(self, ReceiveStatus::Done(_))
+    }
+
+    pub fn has_request(&self) -> bool {
+        matches!(self, ReceiveStatus::SendRequested(_))
+    }
 }
 
 #[repr(u8)]
@@ -299,9 +316,10 @@ impl<'d, T: Instance> I2cSlave<'d, T, Async> {
             + 'd,
         tx_dma: impl Peripheral<P = impl TxDma<T>> + 'd,
         rx_dma: impl Peripheral<P = impl RxDma<T>> + 'd,
+        freq: Hertz,
         config: SlaveConfig,
     ) -> Self {
-        Self::new_inner(peri, scl, sda, new_dma!(tx_dma), new_dma!(rx_dma), config)
+        Self::new_inner(peri, scl, sda, new_dma!(tx_dma), new_dma!(rx_dma), freq, config)
     }
 }
 
@@ -310,9 +328,10 @@ impl<'d, T: Instance> I2cSlave<'d, T, Blocking> {
         peri: impl Peripheral<P = T> + 'd,
         scl: impl Peripheral<P = impl SclPin<T>> + 'd,
         sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        freq: Hertz,
         config: SlaveConfig,
     ) -> Self {
-        Self::new_inner(peri, scl, sda, None, None, config)
+        Self::new_inner(peri, scl, sda, None, None, freq, config)
     }
 }
 impl<'d, T: Instance, M: Mode> I2cSlave<'d, T, M> {
@@ -323,6 +342,7 @@ impl<'d, T: Instance, M: Mode> I2cSlave<'d, T, M> {
         sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
         tx_dma: Option<ChannelAndRequest<'d>>,
         rx_dma: Option<ChannelAndRequest<'d>>,
+        freq: Hertz,
         config: SlaveConfig,
     ) -> Self {
         into_ref!(peri, scl, sda);
@@ -344,7 +364,7 @@ impl<'d, T: Instance, M: Mode> I2cSlave<'d, T, M> {
             _phantom: PhantomData,
         };
 
-        this.init(config);
+        this.init(freq, config);
 
         this
     }
