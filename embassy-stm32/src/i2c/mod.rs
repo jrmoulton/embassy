@@ -1,5 +1,8 @@
 //! Inter-Integrated-Circuit (I2C)
 #![macro_use]
+#![allow(missing_docs)]
+#![allow(dead_code)]
+#![allow(unused)]
 
 #[cfg_attr(i2c_v1, path = "v1.rs")]
 #[cfg_attr(any(i2c_v2, i2c_v3), path = "v2.rs")]
@@ -13,6 +16,7 @@ use embassy_hal_internal::{into_ref, Peripheral, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 #[cfg(feature = "time")]
 use embassy_time::{Duration, Instant};
+use stm32_metapac::i2c::vals::Oamsk;
 
 use crate::dma::ChannelAndRequest;
 use crate::gpio::{AFType, Pull};
@@ -37,13 +41,17 @@ pub enum Error {
     Crc,
     /// Overrun error
     Overrun,
+    // Underun error
+    Underun,
+    // PEC error
+    Pec,
     /// Zero-length transfers are not allowed.
     ZeroLengthTransfer,
 }
 
 /// I2C config
 #[non_exhaustive]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct Config {
     /// Enable internal pullup on SDA.
     ///
@@ -60,17 +68,6 @@ pub struct Config {
     pub timeout: embassy_time::Duration,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            sda_pullup: false,
-            scl_pullup: false,
-            #[cfg(feature = "time")]
-            timeout: embassy_time::Duration::from_millis(1000),
-        }
-    }
-}
-
 /// I2C driver.
 pub struct I2c<'d, T: Instance, M: Mode> {
     _peri: PeripheralRef<'d, T>,
@@ -83,6 +80,7 @@ pub struct I2c<'d, T: Instance, M: Mode> {
 
 impl<'d, T: Instance> I2c<'d, T, Async> {
     /// Create a new I2C driver.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peri: impl Peripheral<P = T> + 'd,
         scl: impl Peripheral<P = impl SclPin<T>> + 'd,
@@ -143,6 +141,216 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
                 false => Pull::None,
             },
         );
+
+        unsafe { T::EventInterrupt::enable() };
+        unsafe { T::ErrorInterrupt::enable() };
+
+        let mut this = Self {
+            _peri: peri,
+            tx_dma,
+            rx_dma,
+            #[cfg(feature = "time")]
+            timeout: config.timeout,
+            _phantom: PhantomData,
+        };
+
+        this.init(freq, config);
+
+        this
+    }
+
+    fn timeout(&self) -> Timeout {
+        Timeout {
+            #[cfg(feature = "time")]
+            deadline: Instant::now() + self.timeout,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendStatus {
+    Done,
+    LeftoverBytes(usize),
+    MoreBytesRequested,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiveStatus {
+    // contains the number of bytes received
+    Done(usize),
+    // contains the number of bytes received
+    SendRequested(usize),
+}
+impl ReceiveStatus {
+    pub fn len(&self) -> usize {
+        match self {
+            ReceiveStatus::Done(n) => *n,
+            ReceiveStatus::SendRequested(n) => *n,
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        matches!(self, ReceiveStatus::Done(_))
+    }
+
+    pub fn has_request(&self) -> bool {
+        matches!(self, ReceiveStatus::SendRequested(_))
+    }
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum AddrMask {
+    NOMASK,
+    MASK1,
+    MASK2,
+    MASK3,
+    MASK4,
+    MASK5,
+    MASK6,
+    MASK7,
+}
+impl From<AddrMask> for Oamsk {
+    fn from(value: AddrMask) -> Self {
+        match value {
+            AddrMask::NOMASK => Oamsk::NOMASK,
+            AddrMask::MASK1 => Oamsk::MASK1,
+            AddrMask::MASK2 => Oamsk::MASK2,
+            AddrMask::MASK3 => Oamsk::MASK3,
+            AddrMask::MASK4 => Oamsk::MASK4,
+            AddrMask::MASK5 => Oamsk::MASK5,
+            AddrMask::MASK6 => Oamsk::MASK6,
+            AddrMask::MASK7 => Oamsk::MASK7,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum OwnAddress {
+    SevenBit(u8),
+    TenBit(u16),
+}
+impl OwnAddress {
+    fn add_mode(&self) -> stm32_metapac::i2c::vals::Addmode {
+        match self {
+            OwnAddress::SevenBit(_) => stm32_metapac::i2c::vals::Addmode::BIT7,
+            OwnAddress::TenBit(_) => stm32_metapac::i2c::vals::Addmode::BIT10,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct OA2 {
+    addr: u8,
+    /// must be a value from 1 to 6
+    mask: AddrMask,
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum OwnAddresses {
+    OA1(OwnAddress),
+    OA2(OA2),
+    Both { oa1: OwnAddress, oa2: OA2 },
+}
+
+/// Slave Configuration
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct SlaveConfig {
+    /// Target Address(es)
+    pub addr: OwnAddresses,
+    /// Control if the peripheral should ack to and report general calls.
+    pub general_call: bool,
+
+    #[cfg(feature = "time")]
+    pub timeout: embassy_time::Duration,
+}
+
+impl Default for SlaveConfig {
+    fn default() -> Self {
+        Self {
+            addr: OwnAddresses::OA1(OwnAddress::SevenBit(0x55)),
+            general_call: true,
+            #[cfg(feature = "time")]
+            timeout: Default::default(),
+        }
+    }
+}
+/// Received command
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum CommandKind {
+    /// Read
+    SlaveSend,
+    /// Slave is receiving data
+    SlaveReceive,
+}
+
+pub struct Command {
+    pub kind: CommandKind,
+    pub address: OwnAddress,
+}
+
+/// I2CSlave driver
+pub struct I2cSlave<'d, T: Instance, M: Mode> {
+    _peri: PeripheralRef<'d, T>,
+    tx_dma: Option<ChannelAndRequest<'d>>,
+    rx_dma: Option<ChannelAndRequest<'d>>,
+    #[cfg(feature = "time")]
+    timeout: Duration,
+    _phantom: PhantomData<M>,
+}
+
+impl<'d, T: Instance> I2cSlave<'d, T, Async> {
+    /// Create a new I2C Slave driver.
+    pub fn new(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        _irq: impl interrupt::typelevel::Binding<T::EventInterrupt, EventInterruptHandler<T>>
+            + interrupt::typelevel::Binding<T::ErrorInterrupt, ErrorInterruptHandler<T>>
+            + 'd,
+        tx_dma: impl Peripheral<P = impl TxDma<T>> + 'd,
+        rx_dma: impl Peripheral<P = impl RxDma<T>> + 'd,
+        freq: Hertz,
+        config: SlaveConfig,
+    ) -> Self {
+        Self::new_inner(peri, scl, sda, new_dma!(tx_dma), new_dma!(rx_dma), freq, config)
+    }
+}
+
+impl<'d, T: Instance> I2cSlave<'d, T, Blocking> {
+    pub fn new_blocking(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        freq: Hertz,
+        config: SlaveConfig,
+    ) -> Self {
+        Self::new_inner(peri, scl, sda, None, None, freq, config)
+    }
+}
+impl<'d, T: Instance, M: Mode> I2cSlave<'d, T, M> {
+    /// Create a new I2C driver.
+    fn new_inner(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        tx_dma: Option<ChannelAndRequest<'d>>,
+        rx_dma: Option<ChannelAndRequest<'d>>,
+        freq: Hertz,
+        config: SlaveConfig,
+    ) -> Self {
+        into_ref!(peri, scl, sda);
+
+        T::enable_and_reset();
+
+        scl.set_as_af_pull(scl.af_num(), AFType::OutputOpenDrain, Pull::None);
+        sda.set_as_af_pull(sda.af_num(), AFType::OutputOpenDrain, Pull::None);
 
         unsafe { T::EventInterrupt::enable() };
         unsafe { T::ErrorInterrupt::enable() };
@@ -313,6 +521,8 @@ impl embedded_hal_1::i2c::Error for Error {
             Self::Timeout => embedded_hal_1::i2c::ErrorKind::Other,
             Self::Crc => embedded_hal_1::i2c::ErrorKind::Other,
             Self::Overrun => embedded_hal_1::i2c::ErrorKind::Overrun,
+            Self::Underun => embedded_hal_1::i2c::ErrorKind::Other,
+            Self::Pec => embedded_hal_1::i2c::ErrorKind::Other,
             Self::ZeroLengthTransfer => embedded_hal_1::i2c::ErrorKind::Other,
         }
     }
@@ -460,9 +670,7 @@ fn operation_frames<'a, 'b: 'a>(
     let mut next_first_frame = true;
 
     Ok(iter::from_fn(move || {
-        let Some(op) = operations.next() else {
-            return None;
-        };
+        let op = operations.next()?;
 
         // Is `op` first frame of its type?
         let first_frame = next_first_frame;
