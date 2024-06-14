@@ -16,6 +16,7 @@ use embassy_hal_internal::{into_ref, Peripheral, PeripheralRef};
 use embassy_sync::waitqueue::AtomicWaker;
 #[cfg(feature = "time")]
 use embassy_time::{Duration, Instant};
+use mode::{I2CMode, Master, MasterMode, SlaveMode};
 use stm32_metapac::i2c::vals::Oamsk;
 
 use crate::dma::ChannelAndRequest;
@@ -49,6 +50,35 @@ pub enum Error {
     ZeroLengthTransfer,
 }
 
+pub mod mode {
+    trait SealedMode {}
+
+    #[allow(private_bounds)]
+    pub trait I2CMode: SealedMode {}
+
+    #[allow(private_bounds)]
+    pub trait MasterMode: I2CMode {}
+    #[allow(private_bounds)]
+    pub trait SlaveMode: I2CMode {}
+
+    pub struct Master;
+    pub struct Slave;
+    pub struct MultiMaster;
+
+    impl SealedMode for Master {}
+    impl I2CMode for Master {}
+    impl MasterMode for Master {}
+
+    impl SealedMode for Slave {}
+    impl I2CMode for Slave {}
+    impl SlaveMode for Slave {}
+
+    impl SealedMode for MultiMaster {}
+    impl I2CMode for MultiMaster {}
+    impl MasterMode for MultiMaster {}
+    impl SlaveMode for MultiMaster {}
+}
+
 /// I2C config
 #[non_exhaustive]
 #[derive(Copy, Clone, Default)]
@@ -63,25 +93,136 @@ pub struct Config {
     /// Using external pullup resistors is recommended for I2C. If you do
     /// have external pullups you should not enable this.
     pub scl_pullup: bool,
+
     /// Timeout.
     #[cfg(feature = "time")]
     pub timeout: embassy_time::Duration,
 }
 
+#[repr(u8)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum AddrMask {
+    NOMASK,
+    MASK1,
+    MASK2,
+    MASK3,
+    MASK4,
+    MASK5,
+    MASK6,
+    MASK7,
+}
+impl From<AddrMask> for Oamsk {
+    fn from(value: AddrMask) -> Self {
+        match value {
+            AddrMask::NOMASK => Oamsk::NOMASK,
+            AddrMask::MASK1 => Oamsk::MASK1,
+            AddrMask::MASK2 => Oamsk::MASK2,
+            AddrMask::MASK3 => Oamsk::MASK3,
+            AddrMask::MASK4 => Oamsk::MASK4,
+            AddrMask::MASK5 => Oamsk::MASK5,
+            AddrMask::MASK6 => Oamsk::MASK6,
+            AddrMask::MASK7 => Oamsk::MASK7,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Address {
+    SevenBit(u8),
+    TenBit(u16),
+}
+impl From<u8> for Address {
+    fn from(value: u8) -> Self {
+        Address::SevenBit(value)
+    }
+}
+impl From<u16> for Address {
+    fn from(value: u16) -> Self {
+        assert!(value < 0x400, "Ten bit address must be less than 0x400");
+        Address::TenBit(value)
+    }
+}
+impl Address {
+    fn add_mode(&self) -> stm32_metapac::i2c::vals::Addmode {
+        match self {
+            Address::SevenBit(_) => stm32_metapac::i2c::vals::Addmode::BIT7,
+            Address::TenBit(_) => stm32_metapac::i2c::vals::Addmode::BIT10,
+        }
+    }
+    fn addr(&self) -> u16 {
+        match self {
+            Address::SevenBit(addr) => *addr as u16,
+            Address::TenBit(addr) => *addr,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct OA2 {
+    pub addr: u8,
+    pub mask: AddrMask,
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum OwnAddresses {
+    OA1(Address),
+    OA2(OA2),
+    Both { oa1: Address, oa2: OA2 },
+}
+
+/// Slave Configuration
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct SlaveAddrConfig {
+    /// Target Address(es)
+    pub addr: OwnAddresses,
+    /// Control if the peripheral should respond to the general call address
+    pub general_call: bool,
+}
+impl SlaveAddrConfig {
+    pub fn new_oa1(addr: Address, general_call: bool) -> Self {
+        Self {
+            addr: OwnAddresses::OA1(addr),
+            general_call,
+        }
+    }
+
+    pub fn basic(addr: Address) -> Self {
+        Self {
+            addr: OwnAddresses::OA1(addr),
+            general_call: false,
+        }
+    }
+}
+
 /// I2C driver.
-pub struct I2c<'d, T: Instance, M: Mode> {
+pub struct I2c<'d, T: Instance, M: Mode, IM: I2CMode> {
     _peri: PeripheralRef<'d, T>,
     tx_dma: Option<ChannelAndRequest<'d>>,
     rx_dma: Option<ChannelAndRequest<'d>>,
     #[cfg(feature = "time")]
     timeout: Duration,
     _phantom: PhantomData<M>,
+    _phantom2: PhantomData<IM>,
 }
 
-impl<'d, T: Instance> I2c<'d, T, Async> {
+impl<'d, T: Instance, M: Mode, IM: I2CMode> I2c<'d, T, M, IM> {
+    fn timeout(&self) -> Timeout {
+        Timeout {
+            #[cfg(feature = "time")]
+            deadline: Instant::now() + self.timeout,
+        }
+    }
+}
+
+impl<'d, T: Instance, IM: MasterMode> I2c<'d, T, Async, IM> {
     /// Create a new I2C driver.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_master(
         peri: impl Peripheral<P = T> + 'd,
         scl: impl Peripheral<P = impl SclPin<T>> + 'd,
         sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
@@ -93,26 +234,25 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
         freq: Hertz,
         config: Config,
     ) -> Self {
-        Self::new_inner(peri, scl, sda, new_dma!(tx_dma), new_dma!(rx_dma), freq, config)
+        Self::new_inner_master(peri, scl, sda, new_dma!(tx_dma), new_dma!(rx_dma), freq, config)
     }
 }
 
-impl<'d, T: Instance> I2c<'d, T, Blocking> {
+impl<'d, T: Instance, IM: MasterMode> I2c<'d, T, Blocking, IM> {
     /// Create a new blocking I2C driver.
-    pub fn new_blocking(
+    pub fn new_blocking_master(
         peri: impl Peripheral<P = T> + 'd,
         scl: impl Peripheral<P = impl SclPin<T>> + 'd,
         sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
         freq: Hertz,
         config: Config,
     ) -> Self {
-        Self::new_inner(peri, scl, sda, None, None, freq, config)
+        Self::new_inner_master(peri, scl, sda, None, None, freq, config)
     }
 }
-
-impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode, IM: MasterMode> I2c<'d, T, M, IM> {
     /// Create a new I2C driver.
-    fn new_inner(
+    fn new_inner_master(
         peri: impl Peripheral<P = T> + 'd,
         scl: impl Peripheral<P = impl SclPin<T>> + 'd,
         sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
@@ -152,18 +292,107 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
             #[cfg(feature = "time")]
             timeout: config.timeout,
             _phantom: PhantomData,
+            _phantom2: PhantomData,
         };
 
         this.init(freq, config);
 
         this
     }
+}
 
-    fn timeout(&self) -> Timeout {
-        Timeout {
+impl<'d, T: Instance, IM: SlaveMode> I2c<'d, T, Async, IM> {
+    /// Create a new asynchronous I2C Slave driver.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_slave(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        _irq: impl interrupt::typelevel::Binding<T::EventInterrupt, EventInterruptHandler<T>>
+            + interrupt::typelevel::Binding<T::ErrorInterrupt, ErrorInterruptHandler<T>>
+            + 'd,
+        tx_dma: impl Peripheral<P = impl TxDma<T>> + 'd,
+        rx_dma: impl Peripheral<P = impl RxDma<T>> + 'd,
+        freq: Hertz,
+        config: Config,
+        slave_addr_config: SlaveAddrConfig,
+    ) -> Self {
+        Self::new_inner_slave(
+            peri,
+            scl,
+            sda,
+            new_dma!(tx_dma),
+            new_dma!(rx_dma),
+            freq,
+            config,
+            slave_addr_config,
+        )
+    }
+}
+
+impl<'d, T: Instance, IM: SlaveMode> I2c<'d, T, Blocking, IM> {
+    /// Create a new blocking I2C slave driver.
+    pub fn new_blocking_slave(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        freq: Hertz,
+        config: Config,
+        slave_addr_config: SlaveAddrConfig,
+    ) -> Self {
+        Self::new_inner_slave(peri, scl, sda, None, None, freq, config, slave_addr_config)
+    }
+}
+
+impl<'d, T: Instance, M: Mode, IM: SlaveMode> I2c<'d, T, M, IM> {
+    fn new_inner_slave(
+        peri: impl Peripheral<P = T> + 'd,
+        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
+        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
+        tx_dma: Option<ChannelAndRequest<'d>>,
+        rx_dma: Option<ChannelAndRequest<'d>>,
+        freq: Hertz,
+        config: Config,
+        slave_addr_config: SlaveAddrConfig,
+    ) -> Self {
+        into_ref!(peri, scl, sda);
+
+        T::enable_and_reset();
+
+        scl.set_as_af_pull(
+            scl.af_num(),
+            AFType::OutputOpenDrain,
+            match config.scl_pullup {
+                true => Pull::Up,
+                false => Pull::None,
+            },
+        );
+        sda.set_as_af_pull(
+            sda.af_num(),
+            AFType::OutputOpenDrain,
+            match config.sda_pullup {
+                true => Pull::Up,
+                false => Pull::None,
+            },
+        );
+
+        unsafe { T::EventInterrupt::enable() };
+        unsafe { T::ErrorInterrupt::enable() };
+
+        let mut this = Self {
+            _peri: peri,
+            tx_dma,
+            rx_dma,
             #[cfg(feature = "time")]
-            deadline: Instant::now() + self.timeout,
-        }
+            timeout: config.timeout,
+            _phantom: PhantomData,
+            _phantom2: PhantomData,
+        };
+
+        this.init(freq, config);
+        this.init_slave(freq, slave_addr_config);
+
+        this
     }
 }
 
@@ -198,88 +427,6 @@ impl ReceiveStatus {
     }
 }
 
-#[repr(u8)]
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum AddrMask {
-    NOMASK,
-    MASK1,
-    MASK2,
-    MASK3,
-    MASK4,
-    MASK5,
-    MASK6,
-    MASK7,
-}
-impl From<AddrMask> for Oamsk {
-    fn from(value: AddrMask) -> Self {
-        match value {
-            AddrMask::NOMASK => Oamsk::NOMASK,
-            AddrMask::MASK1 => Oamsk::MASK1,
-            AddrMask::MASK2 => Oamsk::MASK2,
-            AddrMask::MASK3 => Oamsk::MASK3,
-            AddrMask::MASK4 => Oamsk::MASK4,
-            AddrMask::MASK5 => Oamsk::MASK5,
-            AddrMask::MASK6 => Oamsk::MASK6,
-            AddrMask::MASK7 => Oamsk::MASK7,
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum OwnAddress {
-    SevenBit(u8),
-    TenBit(u16),
-}
-impl OwnAddress {
-    fn add_mode(&self) -> stm32_metapac::i2c::vals::Addmode {
-        match self {
-            OwnAddress::SevenBit(_) => stm32_metapac::i2c::vals::Addmode::BIT7,
-            OwnAddress::TenBit(_) => stm32_metapac::i2c::vals::Addmode::BIT10,
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct OA2 {
-    addr: u8,
-    /// must be a value from 1 to 6
-    mask: AddrMask,
-}
-
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum OwnAddresses {
-    OA1(OwnAddress),
-    OA2(OA2),
-    Both { oa1: OwnAddress, oa2: OA2 },
-}
-
-/// Slave Configuration
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct SlaveConfig {
-    /// Target Address(es)
-    pub addr: OwnAddresses,
-    /// Control if the peripheral should ack to and report general calls.
-    pub general_call: bool,
-
-    #[cfg(feature = "time")]
-    pub timeout: embassy_time::Duration,
-}
-
-impl Default for SlaveConfig {
-    fn default() -> Self {
-        Self {
-            addr: OwnAddresses::OA1(OwnAddress::SevenBit(0x55)),
-            general_call: true,
-            #[cfg(feature = "time")]
-            timeout: Default::default(),
-        }
-    }
-}
 /// Received command
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -292,89 +439,7 @@ pub enum CommandKind {
 
 pub struct Command {
     pub kind: CommandKind,
-    pub address: OwnAddress,
-}
-
-/// I2CSlave driver
-pub struct I2cSlave<'d, T: Instance, M: Mode> {
-    _peri: PeripheralRef<'d, T>,
-    tx_dma: Option<ChannelAndRequest<'d>>,
-    rx_dma: Option<ChannelAndRequest<'d>>,
-    #[cfg(feature = "time")]
-    timeout: Duration,
-    _phantom: PhantomData<M>,
-}
-
-impl<'d, T: Instance> I2cSlave<'d, T, Async> {
-    /// Create a new I2C Slave driver.
-    pub fn new(
-        peri: impl Peripheral<P = T> + 'd,
-        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
-        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
-        _irq: impl interrupt::typelevel::Binding<T::EventInterrupt, EventInterruptHandler<T>>
-            + interrupt::typelevel::Binding<T::ErrorInterrupt, ErrorInterruptHandler<T>>
-            + 'd,
-        tx_dma: impl Peripheral<P = impl TxDma<T>> + 'd,
-        rx_dma: impl Peripheral<P = impl RxDma<T>> + 'd,
-        freq: Hertz,
-        config: SlaveConfig,
-    ) -> Self {
-        Self::new_inner(peri, scl, sda, new_dma!(tx_dma), new_dma!(rx_dma), freq, config)
-    }
-}
-
-impl<'d, T: Instance> I2cSlave<'d, T, Blocking> {
-    pub fn new_blocking(
-        peri: impl Peripheral<P = T> + 'd,
-        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
-        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
-        freq: Hertz,
-        config: SlaveConfig,
-    ) -> Self {
-        Self::new_inner(peri, scl, sda, None, None, freq, config)
-    }
-}
-impl<'d, T: Instance, M: Mode> I2cSlave<'d, T, M> {
-    /// Create a new I2C driver.
-    fn new_inner(
-        peri: impl Peripheral<P = T> + 'd,
-        scl: impl Peripheral<P = impl SclPin<T>> + 'd,
-        sda: impl Peripheral<P = impl SdaPin<T>> + 'd,
-        tx_dma: Option<ChannelAndRequest<'d>>,
-        rx_dma: Option<ChannelAndRequest<'d>>,
-        freq: Hertz,
-        config: SlaveConfig,
-    ) -> Self {
-        into_ref!(peri, scl, sda);
-
-        T::enable_and_reset();
-
-        scl.set_as_af_pull(scl.af_num(), AFType::OutputOpenDrain, Pull::None);
-        sda.set_as_af_pull(sda.af_num(), AFType::OutputOpenDrain, Pull::None);
-
-        unsafe { T::EventInterrupt::enable() };
-        unsafe { T::ErrorInterrupt::enable() };
-
-        let mut this = Self {
-            _peri: peri,
-            tx_dma,
-            rx_dma,
-            #[cfg(feature = "time")]
-            timeout: config.timeout,
-            _phantom: PhantomData,
-        };
-
-        this.init(freq, config);
-
-        this
-    }
-
-    fn timeout(&self) -> Timeout {
-        Timeout {
-            #[cfg(feature = "time")]
-            deadline: Instant::now() + self.timeout,
-        }
-    }
+    pub address: Address,
 }
 
 #[derive(Copy, Clone)]
@@ -486,27 +551,39 @@ foreach_peripheral!(
     };
 );
 
-impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::Read for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode, IM: MasterMode, A: embedded_hal_02::blocking::i2c::AddressMode>
+    embedded_hal_02::blocking::i2c::Read<A> for I2c<'d, T, M, IM>
+where
+    A: Into<Address>,
+{
     type Error = Error;
 
-    fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Self::Error> {
-        self.blocking_read(address, buffer)
+    fn read(&mut self, address: A, buffer: &mut [u8]) -> Result<(), Self::Error> {
+        self.blocking_read(address.into(), buffer)
     }
 }
 
-impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::Write for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode, IM: MasterMode, A: embedded_hal_02::blocking::i2c::AddressMode>
+    embedded_hal_02::blocking::i2c::Write<A> for I2c<'d, T, M, IM>
+where
+    A: Into<Address>,
+{
     type Error = Error;
 
-    fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
-        self.blocking_write(address, write)
+    fn write(&mut self, address: A, write: &[u8]) -> Result<(), Self::Error> {
+        self.blocking_write(address.into(), write)
     }
 }
 
-impl<'d, T: Instance, M: Mode> embedded_hal_02::blocking::i2c::WriteRead for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode, IM: MasterMode, A: embedded_hal_02::blocking::i2c::AddressMode>
+    embedded_hal_02::blocking::i2c::WriteRead<A> for I2c<'d, T, M, IM>
+where
+    A: Into<Address>,
+{
     type Error = Error;
 
-    fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
-        self.blocking_write_read(address, write, read)
+    fn write_read(&mut self, address: A, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
+        self.blocking_write_read(address.into(), write, read)
     }
 }
 
@@ -528,51 +605,59 @@ impl embedded_hal_1::i2c::Error for Error {
     }
 }
 
-impl<'d, T: Instance, M: Mode> embedded_hal_1::i2c::ErrorType for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode, IM: I2CMode> embedded_hal_1::i2c::ErrorType for I2c<'d, T, M, IM> {
     type Error = Error;
 }
 
-impl<'d, T: Instance, M: Mode> embedded_hal_1::i2c::I2c for I2c<'d, T, M> {
-    fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
-        self.blocking_read(address, read)
+impl<'d, T: Instance, M: Mode, IM: MasterMode, A: embedded_hal_1::i2c::AddressMode> embedded_hal_1::i2c::I2c<A>
+    for I2c<'d, T, M, IM>
+where
+    Address: From<A>,
+{
+    fn read(&mut self, address: A, read: &mut [u8]) -> Result<(), Self::Error> {
+        self.blocking_read(address.into(), read)
     }
 
-    fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
-        self.blocking_write(address, write)
+    fn write(&mut self, address: A, write: &[u8]) -> Result<(), Self::Error> {
+        self.blocking_write(address.into(), write)
     }
 
-    fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
-        self.blocking_write_read(address, write, read)
+    fn write_read(&mut self, address: A, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
+        self.blocking_write_read(address.into(), write, read)
     }
 
     fn transaction(
         &mut self,
-        address: u8,
+        address: A,
         operations: &mut [embedded_hal_1::i2c::Operation<'_>],
     ) -> Result<(), Self::Error> {
-        self.blocking_transaction(address, operations)
+        self.blocking_transaction(address.into(), operations)
     }
 }
 
-impl<'d, T: Instance> embedded_hal_async::i2c::I2c for I2c<'d, T, Async> {
-    async fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
-        self.read(address, read).await
+impl<'d, T: Instance, IM: MasterMode, A: embedded_hal_async::i2c::AddressMode> embedded_hal_async::i2c::I2c<A>
+    for I2c<'d, T, Async, IM>
+where
+    Address: From<A>,
+{
+    async fn read(&mut self, address: A, read: &mut [u8]) -> Result<(), Self::Error> {
+        self.read(address.into(), read).await
     }
 
-    async fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
-        self.write(address, write).await
+    async fn write(&mut self, address: A, write: &[u8]) -> Result<(), Self::Error> {
+        self.write(address.into(), write).await
     }
 
-    async fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
-        self.write_read(address, write, read).await
+    async fn write_read(&mut self, address: A, write: &[u8], read: &mut [u8]) -> Result<(), Self::Error> {
+        self.write_read(address.into(), write, read).await
     }
 
     async fn transaction(
         &mut self,
-        address: u8,
+        address: A,
         operations: &mut [embedded_hal_1::i2c::Operation<'_>],
     ) -> Result<(), Self::Error> {
-        self.transaction(address, operations).await
+        self.transaction(address.into(), operations).await
     }
 }
 

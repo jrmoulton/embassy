@@ -7,6 +7,7 @@ use embassy_embedded_hal::SetConfig;
 use embassy_hal_internal::drop::OnDrop;
 use embedded_hal_1::i2c::Operation;
 use futures_util::FutureExt;
+use mode::{Slave, SlaveMode};
 use stm32_metapac::i2c::vals::Addmode;
 
 use super::*;
@@ -17,7 +18,7 @@ pub(crate) unsafe fn on_interrupt<T: Instance>() {
     let regs = T::regs();
     let isr = regs.isr().read();
 
-    if isr.tcr() || isr.tc() || isr.addr() || isr.stopf() | isr.ovr() {
+    if isr.tcr() || isr.tc() || isr.addr() || isr.stopf() {
         T::state().waker.wake();
     }
     // The flag can only be cleared by writting to nbytes, we won't do that here, so disable
@@ -31,127 +32,8 @@ pub(crate) unsafe fn on_interrupt<T: Instance>() {
     });
 }
 
-impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
-    pub(crate) fn init(&mut self, freq: Hertz, _config: Config) {
-        T::regs().cr1().modify(|reg| {
-            reg.set_pe(false);
-            reg.set_anfoff(false);
-        });
-
-        let timings = Timings::new(T::frequency(), freq);
-
-        T::regs().timingr().write(|reg| {
-            reg.set_presc(timings.prescale);
-            reg.set_scll(timings.scll);
-            reg.set_sclh(timings.sclh);
-            reg.set_sdadel(timings.sdadel);
-            reg.set_scldel(timings.scldel);
-        });
-
-        T::regs().cr1().modify(|reg| {
-            reg.set_pe(true);
-        });
-    }
-
-    fn master_stop(&mut self) {
-        T::regs().cr2().write(|w| w.set_stop(true));
-    }
-
-    fn master_read(
-        address: u8,
-        length: usize,
-        stop: Stop,
-        reload: bool,
-        restart: bool,
-        timeout: Timeout,
-    ) -> Result<(), Error> {
-        assert!(length < 256);
-
-        if !restart {
-            // Wait for any previous address sequence to end
-            // automatically. This could be up to 50% of a bus
-            // cycle (ie. up to 0.5/freq)
-            while T::regs().cr2().read().start() {
-                timeout.check()?;
-            }
-        }
-
-        // Set START and prepare to receive bytes into
-        // `buffer`. The START bit can be set even if the bus
-        // is BUSY or I2C is in slave mode.
-
-        let reload = if reload {
-            i2c::vals::Reload::NOTCOMPLETED
-        } else {
-            i2c::vals::Reload::COMPLETED
-        };
-
-        T::regs().cr2().modify(|w| {
-            w.set_sadd((address << 1) as u16);
-            w.set_add10(Addmode::BIT7);
-            w.set_dir(i2c::vals::Dir::READ);
-            w.set_nbytes(length as u8);
-            w.set_start(true);
-            w.set_autoend(stop.autoend());
-            w.set_reload(reload);
-        });
-
-        Ok(())
-    }
-
-    fn master_write(address: u8, length: usize, stop: Stop, reload: bool, timeout: Timeout) -> Result<(), Error> {
-        assert!(length < 256);
-
-        // Wait for any previous address sequence to end
-        // automatically. This could be up to 50% of a bus
-        // cycle (ie. up to 0.5/freq)
-        while T::regs().cr2().read().start() {
-            timeout.check()?;
-        }
-
-        let reload = if reload {
-            i2c::vals::Reload::NOTCOMPLETED
-        } else {
-            i2c::vals::Reload::COMPLETED
-        };
-
-        // Set START and prepare to send `bytes`. The
-        // START bit can be set even if the bus is BUSY or
-        // I2C is in slave mode.
-        T::regs().cr2().modify(|w| {
-            w.set_sadd((address << 1) as u16);
-            w.set_add10(Addmode::BIT7);
-            w.set_dir(i2c::vals::Dir::WRITE);
-            w.set_nbytes(length as u8);
-            w.set_start(true);
-            w.set_autoend(stop.autoend());
-            w.set_reload(reload);
-        });
-
-        Ok(())
-    }
-
-    fn master_continue(length: usize, reload: bool, timeout: Timeout) -> Result<(), Error> {
-        assert!(length < 256 && length > 0);
-
-        while !T::regs().isr().read().tcr() {
-            timeout.check()?;
-        }
-
-        let reload = if reload {
-            i2c::vals::Reload::NOTCOMPLETED
-        } else {
-            i2c::vals::Reload::COMPLETED
-        };
-
-        T::regs().cr2().modify(|w| {
-            w.set_nbytes(length as u8);
-            w.set_reload(reload);
-        });
-
-        Ok(())
-    }
-
+// ========================= I2c (all modes) methods =========================
+impl<'d, T: Instance, M: Mode, IM: I2CMode> I2c<'d, T, M, IM> {
     fn flush_txdr(&self) {
         if T::regs().isr().read().txis() {
             T::regs().txdr().write(|w| w.set_txdata(0));
@@ -203,6 +85,53 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
         }
     }
 
+    // configure the I2C peripheral to continue a previously started  async or blocking read or write operation.
+    // this should be called when and only when a previous read or write operation has completed and the previous operation had `set_reload` set to `NOTCOMPLETED`.
+    fn i2c_continue(length: usize, reload: bool, timeout: Timeout) -> Result<(), Error> {
+        assert!(length < 256 && length > 0);
+
+        while !T::regs().isr().read().tcr() {
+            timeout.check()?;
+        }
+
+        let reload = if reload {
+            i2c::vals::Reload::NOTCOMPLETED
+        } else {
+            i2c::vals::Reload::COMPLETED
+        };
+
+        T::regs().cr2().modify(|w| {
+            w.set_nbytes(length as u8);
+            w.set_reload(reload);
+        });
+
+        Ok(())
+    }
+
+    pub(crate) fn init(&mut self, freq: Hertz, _config: Config) {
+        T::regs().cr1().modify(|reg| {
+            reg.set_pe(false);
+            reg.set_anfoff(false);
+        });
+
+        let timings = Timings::new(T::frequency(), freq);
+
+        T::regs().timingr().write(|reg| {
+            reg.set_presc(timings.prescale);
+            reg.set_scll(timings.scll);
+            reg.set_sclh(timings.sclh);
+            reg.set_sdadel(timings.sdadel);
+            reg.set_scldel(timings.scldel);
+        });
+
+        T::regs().cr1().modify(|reg| {
+            reg.set_pe(true);
+        });
+    }
+}
+
+// ========================= I2cMaster methods =========================
+impl<'d, T: Instance, M: Mode, MM: MasterMode> I2c<'d, T, M, MM> {
     fn wait_tc(&self, timeout: Timeout) -> Result<(), Error> {
         loop {
             let isr = T::regs().isr().read();
@@ -224,7 +153,94 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
         }
     }
 
-    fn read_internal(&mut self, address: u8, read: &mut [u8], restart: bool, timeout: Timeout) -> Result<(), Error> {
+    fn master_stop(&mut self) {
+        T::regs().cr2().write(|w| w.set_stop(true));
+    }
+
+    // configure the I2C peripheral as a master device set to read either asynchronously with DMA or perform a blocking read
+    fn master_read(
+        address: Address,
+        length: usize,
+        stop: Stop,
+        reload: bool,
+        restart: bool,
+        timeout: Timeout,
+    ) -> Result<(), Error> {
+        assert!(length < 256);
+
+        if !restart {
+            // Wait for any previous address sequence to end
+            // automatically. This could be up to 50% of a bus
+            // cycle (ie. up to 0.5/freq)
+            while T::regs().cr2().read().start() {
+                timeout.check()?;
+            }
+        }
+
+        // Set START and prepare to receive bytes into
+        // `buffer`. The START bit can be set even if the bus
+        // is BUSY or I2C is in slave mode.
+
+        let reload = if reload {
+            i2c::vals::Reload::NOTCOMPLETED
+        } else {
+            i2c::vals::Reload::COMPLETED
+        };
+
+        T::regs().cr2().modify(|w| {
+            w.set_sadd(address.addr() << 1);
+            w.set_add10(address.add_mode());
+            w.set_dir(i2c::vals::Dir::READ);
+            w.set_nbytes(length as u8);
+            w.set_start(true);
+            w.set_autoend(stop.autoend());
+            w.set_reload(reload);
+        });
+
+        Ok(())
+    }
+
+    // configure the I2C peripheral as a master device set to write either asynchronously with DMA or perform a blocking write
+    fn master_write(address: Address, length: usize, stop: Stop, reload: bool, timeout: Timeout) -> Result<(), Error> {
+        assert!(length < 256);
+
+        // Wait for any previous address sequence to end
+        // automatically. This could be up to 50% of a bus
+        // cycle (ie. up to 0.5/freq)
+        while T::regs().cr2().read().start() {
+            timeout.check()?;
+        }
+
+        let reload = if reload {
+            i2c::vals::Reload::NOTCOMPLETED
+        } else {
+            i2c::vals::Reload::COMPLETED
+        };
+
+        // Set START and prepare to send `bytes`. The
+        // START bit can be set even if the bus is BUSY or
+        // I2C is in slave mode.
+        T::regs().cr2().modify(|w| {
+            w.set_sadd(address.addr() << 1);
+            w.set_add10(address.add_mode());
+            w.set_dir(i2c::vals::Dir::WRITE);
+            w.set_nbytes(length as u8);
+            w.set_start(true);
+            w.set_autoend(stop.autoend());
+            w.set_reload(reload);
+        });
+
+        Ok(())
+    }
+
+    // A blocking read operation
+    fn read_internal(
+        &mut self,
+        address: Address,
+        read: &mut [u8],
+        restart: bool,
+        timeout: Timeout,
+    ) -> Result<(), Error> {
         let completed_chunks = read.len() / 255;
         let total_chunks = if completed_chunks * 255 == read.len() {
             completed_chunks
@@ -244,7 +260,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
 
         for (number, chunk) in read.chunks_mut(255).enumerate() {
             if number != 0 {
-                Self::master_continue(chunk.len(), number != last_chunk_idx, timeout)?;
+                Self::i2c_continue(chunk.len(), number != last_chunk_idx, timeout)?;
             }
 
             for byte in chunk {
@@ -257,7 +273,13 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
         Ok(())
     }
 
-    fn write_internal(&mut self, address: u8, write: &[u8], send_stop: bool, timeout: Timeout) -> Result<(), Error> {
+    fn write_internal(
+        &mut self,
+        address: Address,
+        write: &[u8],
+        send_stop: bool,
+        timeout: Timeout,
+    ) -> Result<(), Error> {
         let completed_chunks = write.len() / 255;
         let total_chunks = if completed_chunks * 255 == write.len() {
             completed_chunks
@@ -284,7 +306,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
 
         for (number, chunk) in write.chunks(255).enumerate() {
             if number != 0 {
-                Self::master_continue(chunk.len(), number != last_chunk_idx, timeout)?;
+                Self::i2c_continue(chunk.len(), number != last_chunk_idx, timeout)?;
             }
 
             for byte in chunk {
@@ -313,18 +335,18 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
     //  Blocking public API
 
     /// Blocking read.
-    pub fn blocking_read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Error> {
+    pub fn blocking_read(&mut self, address: Address, read: &mut [u8]) -> Result<(), Error> {
         self.read_internal(address, read, false, self.timeout())
         // Automatic Stop
     }
 
     /// Blocking write.
-    pub fn blocking_write(&mut self, address: u8, write: &[u8]) -> Result<(), Error> {
+    pub fn blocking_write(&mut self, address: Address, write: &[u8]) -> Result<(), Error> {
         self.write_internal(address, write, true, self.timeout())
     }
 
     /// Blocking write, restart, read.
-    pub fn blocking_write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Error> {
+    pub fn blocking_write_read(&mut self, address: Address, write: &[u8], read: &mut [u8]) -> Result<(), Error> {
         let timeout = self.timeout();
         self.write_internal(address, write, false, timeout)?;
         self.read_internal(address, read, true, timeout)
@@ -336,7 +358,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
     /// Consecutive operations of same type are merged. See [transaction contract] for details.
     ///
     /// [transaction contract]: embedded_hal_1::i2c::I2c::transaction
-    pub fn blocking_transaction(&mut self, addr: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
+    pub fn blocking_transaction(&mut self, addr: Address, operations: &mut [Operation<'_>]) -> Result<(), Error> {
         let _ = addr;
         let _ = operations;
         todo!()
@@ -345,7 +367,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
     /// Blocking write multiple buffers.
     ///
     /// The buffers are concatenated in a single write transaction.
-    pub fn blocking_write_vectored(&mut self, address: u8, write: &[&[u8]]) -> Result<(), Error> {
+    pub fn blocking_write_vectored(&mut self, address: Address, write: &[&[u8]]) -> Result<(), Error> {
         if write.is_empty() {
             return Err(Error::ZeroLengthTransfer);
         }
@@ -377,7 +399,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
             let last_chunk_idx = total_chunks.saturating_sub(1);
 
             if idx != 0 {
-                if let Err(err) = Self::master_continue(
+                if let Err(err) = Self::i2c_continue(
                     slice_len.min(255),
                     (idx != last_slice_index) || (slice_len > 255),
                     timeout,
@@ -389,7 +411,7 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
 
             for (number, chunk) in slice.chunks(255).enumerate() {
                 if number != 0 {
-                    if let Err(err) = Self::master_continue(
+                    if let Err(err) = Self::i2c_continue(
                         chunk.len(),
                         (number != last_chunk_idx) || (idx != last_slice_index),
                         timeout,
@@ -421,10 +443,10 @@ impl<'d, T: Instance, M: Mode> I2c<'d, T, M> {
     }
 }
 
-impl<'d, T: Instance> I2c<'d, T, Async> {
+impl<'d, T: Instance, MM: MasterMode> I2c<'d, T, Async, MM> {
     async fn write_dma_internal(
         &mut self,
-        address: u8,
+        address: Address,
         write: &[u8],
         first_slice: bool,
         last_slice: bool,
@@ -472,7 +494,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
                         timeout,
                     )?;
                 } else {
-                    Self::master_continue(total_len.min(255), (total_len > 255) || !last_slice, timeout)?;
+                    Self::i2c_continue(total_len.min(255), (total_len > 255) || !last_slice, timeout)?;
                     T::regs().cr1().modify(|w| w.set_tcie(true));
                 }
             } else if !(isr.tcr() || isr.tc()) {
@@ -483,7 +505,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
             } else {
                 let last_piece = (remaining_len <= 255) && last_slice;
 
-                if let Err(e) = Self::master_continue(remaining_len.min(255), !last_piece, timeout) {
+                if let Err(e) = Self::i2c_continue(remaining_len.min(255), !last_piece, timeout) {
                     return Poll::Ready(Err(e));
                 }
                 T::regs().cr1().modify(|w| w.set_tcie(true));
@@ -509,7 +531,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
 
     async fn read_dma_internal(
         &mut self,
-        address: u8,
+        address: Address,
         buffer: &mut [u8],
         restart: bool,
         timeout: Timeout,
@@ -559,7 +581,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
             } else {
                 let last_piece = remaining_len <= 255;
 
-                if let Err(e) = Self::master_continue(remaining_len.min(255), !last_piece, timeout) {
+                if let Err(e) = Self::i2c_continue(remaining_len.min(255), !last_piece, timeout) {
                     return Poll::Ready(Err(e));
                 }
                 T::regs().cr1().modify(|w| w.set_tcie(true));
@@ -585,7 +607,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
     //  Async public API
 
     /// Write.
-    pub async fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Error> {
+    pub async fn write(&mut self, address: Address, write: &[u8]) -> Result<(), Error> {
         let timeout = self.timeout();
         if write.is_empty() {
             self.write_internal(address, write, true, timeout)
@@ -599,7 +621,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
     /// Write multiple buffers.
     ///
     /// The buffers are concatenated in a single write transaction.
-    pub async fn write_vectored(&mut self, address: u8, write: &[&[u8]]) -> Result<(), Error> {
+    pub async fn write_vectored(&mut self, address: Address, write: &[&[u8]]) -> Result<(), Error> {
         let timeout = self.timeout();
 
         if write.is_empty() {
@@ -622,7 +644,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
     }
 
     /// Read.
-    pub async fn read(&mut self, address: u8, buffer: &mut [u8]) -> Result<(), Error> {
+    pub async fn read(&mut self, address: Address, buffer: &mut [u8]) -> Result<(), Error> {
         let timeout = self.timeout();
 
         if buffer.is_empty() {
@@ -634,7 +656,7 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
     }
 
     /// Write, restart, read.
-    pub async fn write_read(&mut self, address: u8, write: &[u8], read: &mut [u8]) -> Result<(), Error> {
+    pub async fn write_read(&mut self, address: Address, write: &[u8], read: &mut [u8]) -> Result<(), Error> {
         let timeout = self.timeout();
 
         if write.is_empty() {
@@ -659,20 +681,339 @@ impl<'d, T: Instance> I2c<'d, T, Async> {
     /// Consecutive operations of same type are merged. See [transaction contract] for details.
     ///
     /// [transaction contract]: embedded_hal_1::i2c::I2c::transaction
-    pub async fn transaction(&mut self, addr: u8, operations: &mut [Operation<'_>]) -> Result<(), Error> {
+    pub async fn transaction(&mut self, addr: Address, operations: &mut [Operation<'_>]) -> Result<(), Error> {
         let _ = addr;
         let _ = operations;
         todo!()
     }
 }
 
-impl<'d, T: Instance, M: Mode> Drop for I2c<'d, T, M> {
-    fn drop(&mut self) {
-        T::disable();
+// ========================= I2cSlave methods =========================
+impl<'d, T: Instance, M: Mode, IM: SlaveMode> I2c<'d, T, M, IM> {
+    pub(crate) fn init_slave(&mut self, freq: Hertz, config: SlaveAddrConfig) {
+        T::regs().cr1().modify(|reg| {
+            reg.set_pe(false);
+        });
+
+        T::regs().cr1().modify(|reg| {
+            reg.set_nostretch(false);
+            reg.set_gcen(config.general_call);
+            reg.set_sbc(true);
+            reg.set_pe(true);
+        });
+
+        self.reconfigure_addresses(config.addr);
+    }
+
+    /// Configure the slave address.
+    pub fn reconfigure_addresses(&mut self, addresses: OwnAddresses) {
+        match addresses {
+            OwnAddresses::OA1(oa1) => Self::configure_oa1(oa1),
+            OwnAddresses::OA2(oa2) => Self::configure_oa2(oa2),
+            OwnAddresses::Both { oa1, oa2 } => {
+                Self::configure_oa1(oa1);
+                Self::configure_oa2(oa2);
+            }
+        }
+    }
+
+    fn configure_oa1(oa1: Address) {
+        match oa1 {
+            Address::SevenBit(addr) => T::regs().oar1().write(|reg| {
+                reg.set_oa1en(false);
+                reg.set_oa1((addr << 1) as u16);
+                reg.set_oa1mode(Addmode::BIT7);
+                reg.set_oa1en(true);
+            }),
+            Address::TenBit(addr) => T::regs().oar1().write(|reg| {
+                reg.set_oa1en(false);
+                reg.set_oa1(addr);
+                reg.set_oa1mode(Addmode::BIT10);
+                reg.set_oa1en(true);
+            }),
+        }
+    }
+
+    fn configure_oa2(oa2: OA2) {
+        T::regs().oar2().write(|reg| {
+            reg.set_oa2en(false);
+            reg.set_oa2msk(oa2.mask.into());
+            reg.set_oa2(oa2.addr << 1);
+            reg.set_oa2en(true);
+        });
+    }
+
+    fn determine_matched_address(&self) -> Result<Address, Error> {
+        let matched = T::regs().isr().read().addcode();
+
+        if matched >> 3 == 0b11110 {
+            // is 10-bit address and we need to get the other 8 bits from the rxdr
+            // we do this by doing a blocking read of 1 byte
+            let mut buffer = [0];
+            self.slave_read_internal(&mut buffer, self.timeout())?;
+            Ok(Address::TenBit((matched as u16) << 6 | buffer[0] as u16))
+        } else {
+            Ok(Address::SevenBit(matched))
+        }
+    }
+
+    // A blocking read operation
+    fn slave_read_internal(&self, read: &mut [u8], timeout: Timeout) -> Result<(), Error> {
+        let completed_chunks = read.len() / 255;
+        let total_chunks = if completed_chunks * 255 == read.len() {
+            completed_chunks
+        } else {
+            completed_chunks + 1
+        };
+        let last_chunk_idx = total_chunks.saturating_sub(1);
+        for (number, chunk) in read.chunks_mut(255).enumerate() {
+            if number != 0 {
+                Self::i2c_continue(chunk.len(), number != last_chunk_idx, timeout)?;
+            }
+
+            for byte in chunk {
+                // Wait until we have received something
+                self.wait_rxne(timeout)?;
+
+                *byte = T::regs().rxdr().read().rxdata();
+            }
+        }
+
+        Ok(())
+    }
+
+    // A blocking write operation
+    fn slave_write_internal(&mut self, write: &[u8], timeout: Timeout) -> Result<(), Error> {
+        let completed_chunks = write.len() / 255;
+        let total_chunks = if completed_chunks * 255 == write.len() {
+            completed_chunks
+        } else {
+            completed_chunks + 1
+        };
+        let last_chunk_idx = total_chunks.saturating_sub(1);
+
+        for (number, chunk) in write.chunks(255).enumerate() {
+            if number != 0 {
+                Self::i2c_continue(chunk.len(), number != last_chunk_idx, timeout)?;
+            }
+
+            for byte in chunk {
+                // Wait until we are allowed to send data
+                // (START has been ACKed or last byte when
+                // through)
+                self.wait_txe(timeout)?;
+
+                T::regs().txdr().write(|w| w.set_txdata(*byte));
+            }
+        }
+        Ok(())
+    }
+
+    /// Listen for incoming I2C messages.
+    ///
+    /// The listen method is an asynchronous method but it does not require DMA to be asynchronous.
+    pub async fn listen(&mut self) -> Result<Command, Error> {
+        let state = T::state();
+
+        T::regs().cr1().modify(|reg| {
+            reg.set_addrie(true);
+        });
+
+        poll_fn(|cx| {
+            state.waker.register(cx.waker());
+            let isr = T::regs().isr().read();
+            if !isr.addr() {
+                Poll::Pending
+            } else {
+                // we do not clear the address flag here as it will be cleared by the dma read/write
+                // if we clear it here the clock stretching will stop and the master will read in data before the slave is ready to send it
+                match isr.dir() {
+                    i2c::vals::Dir::WRITE => Poll::Ready(Ok(Command {
+                        kind: CommandKind::SlaveReceive,
+                        address: self.determine_matched_address()?,
+                    })),
+                    i2c::vals::Dir::READ => Poll::Ready(Ok(Command {
+                        kind: CommandKind::SlaveSend,
+                        address: self.determine_matched_address()?,
+                    })),
+                }
+            }
+        })
+        .await
     }
 }
 
-impl<'d, T: Instance, M: Mode> Drop for I2cSlave<'d, T, M> {
+impl<'d, T: Instance, IM: SlaveMode> I2c<'d, T, Async, IM> {
+    pub async fn respond_to_write(&mut self, buffer: &mut [u8]) -> Result<ReceiveStatus, Error> {
+        let timeout = self.timeout();
+        let size = timeout.with(self.read_dma_internal_save(buffer, timeout)).await?;
+
+        T::regs().cr1().modify(|reg| {
+            reg.set_addrie(true);
+        });
+
+        let state = T::state();
+
+        let send_requested = self
+            .timeout()
+            .with(poll_fn(|cx| {
+                state.waker.register(cx.waker());
+
+                let isr = T::regs().isr().read();
+                if isr.addr() {
+                    if isr.dir() == i2c::vals::Dir::READ {
+                        return Poll::Ready(Ok(ReceiveStatus::SendRequested(size)));
+                    } else {
+                        return Poll::Ready(Ok(ReceiveStatus::Done(size)));
+                    }
+                };
+                Poll::Pending
+            }))
+            .await;
+
+        match send_requested {
+            Ok(ReceiveStatus::SendRequested(size)) => Ok(ReceiveStatus::SendRequested(size)),
+            Ok(ReceiveStatus::Done(_)) | Err(_) => Ok(ReceiveStatus::Done(size)),
+        }
+    }
+
+    pub async fn respond_to_send(&mut self, buffer: &[u8]) -> Result<SendStatus, Error> {
+        let timeout = self.timeout();
+        timeout
+            .with(self.write_dma_internal_slave(buffer, timeout, false))
+            .await
+    }
+
+    // pub async fn respond_and_fill(&mut self, buffer: &[u8], fill: u8) -> Result<SendStatus, Error> {
+    //     let resp_stat = self.respond_to_send(buffer).await?;
+
+    //     let res = if matches!(resp_stat, SendStatus::MoreBytesRequested) {
+    //         self.write_dma_internal(&[fill], self.timeout(), true).await?;
+    //         Ok(SendStatus::Done)
+    //     } else {
+    //         Ok(resp_stat)
+    //     };
+
+    //     res
+    // }
+
+    // for data reception in slave mode
+    async fn read_dma_internal_save(&mut self, buffer: &mut [u8], timeout: Timeout) -> Result<usize, Error> {
+        let total_len = buffer.len();
+
+        let mut dma_transfer = unsafe {
+            let regs = T::regs();
+            regs.cr2().modify(|w| w.set_nbytes(total_len as u8));
+            regs.cr1().modify(|w| {
+                w.set_rxdmaen(true);
+                w.set_stopie(true);
+            });
+            let src = regs.rxdr().as_ptr() as *mut u8;
+
+            self.rx_dma.as_mut().unwrap().read(src, buffer, Default::default())
+        };
+
+        let state = T::state();
+        let mut remaining_len = total_len;
+
+        let on_drop = OnDrop::new(|| {
+            let regs = T::regs();
+            regs.cr1().modify(|w| {
+                w.set_rxdmaen(false);
+                w.set_stopie(false);
+            })
+        });
+        T::regs().icr().modify(|reg| reg.set_addrcf(true));
+
+        let total_received = poll_fn(|cx| {
+            state.waker.register(cx.waker());
+
+            let isr = T::regs().isr().read();
+            if isr.stopf() {
+                T::regs().icr().write(|reg| reg.set_stopcf(true));
+                let poll = Poll::Ready(Ok(total_len - dma_transfer.get_remaining_transfers() as usize));
+                dma_transfer.request_stop();
+                poll
+            } else {
+                Poll::Pending
+            }
+        })
+        .await?;
+
+        dma_transfer.await;
+
+        drop(on_drop);
+
+        Ok(total_received)
+    }
+    // writing dma (mem -> peripheral) is for responding to an I2C slave read request
+    // setting circular to true is used to write a single byte until the stop condition
+    async fn write_dma_internal_slave(
+        &mut self,
+        buffer: &[u8],
+        timeout: Timeout,
+        circular: bool,
+    ) -> Result<SendStatus, Error> {
+        let total_len = if circular { 255 } else { buffer.len() };
+
+        let timeout = self.timeout();
+
+        let mut dma_transfer = unsafe {
+            let regs = T::regs();
+            regs.cr2().modify(|w| w.set_nbytes(total_len as u8));
+            regs.cr1().modify(|w| {
+                w.set_txdmaen(true);
+                w.set_stopie(true);
+            });
+            let dst = regs.txdr().as_ptr() as *mut u8;
+
+            let transfer_options = TransferOptions {
+                circular,
+                ..Default::default()
+            };
+            self.tx_dma.as_mut().unwrap().write(buffer, dst, transfer_options)
+        };
+        T::regs().icr().modify(|reg| reg.set_addrcf(true));
+
+        let state = T::state();
+        let mut remaining_len = total_len;
+
+        let on_drop = OnDrop::new(|| {
+            let regs = T::regs();
+            regs.cr1().modify(|w| {
+                w.set_txdmaen(false);
+                w.set_stopie(false);
+            })
+        });
+
+        let size = poll_fn(|cx| {
+            state.waker.register(cx.waker());
+
+            let isr = T::regs().isr().read();
+            if isr.stopf() {
+                T::regs().icr().write(|reg| reg.set_stopcf(true));
+                let remaining = dma_transfer.get_remaining_transfers();
+                if remaining > 0 {
+                    dma_transfer.request_stop();
+                    Poll::Ready(Ok(SendStatus::LeftoverBytes(remaining as usize)))
+                } else {
+                    Poll::Ready(Ok(SendStatus::Done))
+                }
+            } else {
+                Poll::Pending
+            }
+        })
+        .await?;
+
+        dma_transfer.await;
+
+        drop(on_drop);
+
+        Ok(size)
+    }
+}
+
+impl<'d, T: Instance, M: Mode, MM: I2CMode> Drop for I2c<'d, T, M, MM> {
     fn drop(&mut self) {
         T::disable();
     }
@@ -802,7 +1143,7 @@ impl Timings {
     }
 }
 
-impl<'d, T: Instance, M: Mode> SetConfig for I2c<'d, T, M> {
+impl<'d, T: Instance, M: Mode> SetConfig for I2c<'d, T, M, Master> {
     type Config = Hertz;
     type ConfigError = ();
     fn set_config(&mut self, config: &Self::Config) -> Result<(), ()> {
@@ -819,312 +1160,20 @@ impl<'d, T: Instance, M: Mode> SetConfig for I2c<'d, T, M> {
     }
 }
 
-impl<'d, T: Instance, M: Mode> SetConfig for I2cSlave<'d, T, M> {
-    type Config = Hertz;
+impl<'d, T: Instance, M: Mode> SetConfig for I2c<'d, T, M, Slave> {
+    type Config = (Hertz, OwnAddresses);
     type ConfigError = ();
     fn set_config(&mut self, config: &Self::Config) -> Result<(), ()> {
-        let timings = Timings::new(T::frequency(), *config);
+        let timings = Timings::new(T::frequency(), config.0);
         T::regs().timingr().write(|reg| {
             reg.set_presc(timings.prescale);
+            reg.set_scll(timings.scll);
+            reg.set_sclh(timings.sclh);
             reg.set_sdadel(timings.sdadel);
             reg.set_scldel(timings.scldel);
         });
+        self.reconfigure_addresses(config.1);
 
         Ok(())
-    }
-}
-
-// I2cSlave methods
-impl<'d, T: Instance, M: Mode> I2cSlave<'d, T, M> {
-    pub(crate) fn init(&mut self, freq: Hertz, config: SlaveConfig) {
-        T::regs().cr1().modify(|reg| {
-            reg.set_pe(false);
-            reg.set_anfoff(false);
-        });
-
-        let timings = Timings::new(T::frequency(), freq);
-
-        T::regs().timingr().write(|reg| {
-            reg.set_presc(timings.prescale);
-            reg.set_sdadel(timings.sdadel);
-            reg.set_scldel(timings.scldel);
-        });
-
-        T::regs().cr1().modify(|reg| {
-            reg.set_nostretch(false);
-            reg.set_gcen(config.general_call);
-            reg.set_sbc(true);
-            reg.set_pe(true);
-        });
-
-        self.reconfigure_addresses(config.addr);
-    }
-
-    pub fn reconfigure_addresses(&mut self, addresses: OwnAddresses) {
-        match addresses {
-            OwnAddresses::OA1(oa1) => Self::configure_oa1(oa1),
-            OwnAddresses::OA2(oa2) => Self::configure_oa2(oa2),
-            OwnAddresses::Both { oa1, oa2 } => {
-                Self::configure_oa1(oa1);
-                Self::configure_oa2(oa2);
-            }
-        }
-    }
-
-    fn configure_oa1(oa1: OwnAddress) {
-        match oa1 {
-            OwnAddress::SevenBit(addr) => T::regs().oar1().write(|reg| {
-                reg.set_oa1en(false);
-                reg.set_oa1((addr << 1) as u16);
-                reg.set_oa1mode(Addmode::BIT7);
-                reg.set_oa1en(true);
-            }),
-            OwnAddress::TenBit(addr) => T::regs().oar1().write(|reg| {
-                reg.set_oa1en(false);
-                reg.set_oa1(addr);
-                reg.set_oa1mode(Addmode::BIT10);
-                reg.set_oa1en(true);
-            }),
-        }
-    }
-
-    fn configure_oa2(oa2: OA2) {
-        T::regs().oar2().write(|reg| {
-            reg.set_oa2en(false);
-            reg.set_oa2msk(oa2.mask.into());
-            reg.set_oa2(oa2.addr << 1);
-            reg.set_oa2en(true);
-        });
-    }
-
-    /// Listen for incoming I2C messages.
-    ///
-    /// `size_to_receive` is a function that takes the matched address as an argument and returns the number of bytes that are expected to be received from the master.
-    pub async fn listen(&mut self) -> Result<Command, Error> {
-        let state = T::state();
-
-        T::regs().cr1().modify(|reg| {
-            reg.set_addrie(true);
-        });
-
-        poll_fn(|cx| {
-            state.waker.register(cx.waker());
-            let isr = T::regs().isr().read();
-            if !isr.addr() {
-                return Poll::Pending;
-            } else {
-                // we do not clear the address flag here as it will be cleared by the dma read/write
-                // if we clear it here the clock stretching will stop and the master will read in data before the slave is ready to send it
-
-                match isr.dir() {
-                    i2c::vals::Dir::WRITE => {
-                        return Poll::Ready(Ok(Command {
-                            kind: CommandKind::SlaveReceive,
-                            address: self.determine_matched_address()?,
-                        }));
-                    }
-                    i2c::vals::Dir::READ => {
-                        return Poll::Ready(Ok(Command {
-                            kind: CommandKind::SlaveSend,
-                            address: self.determine_matched_address()?,
-                        }));
-                    }
-                }
-            }
-        })
-        .await
-    }
-
-    fn determine_matched_address(&self) -> Result<OwnAddress, Error> {
-        let matched = T::regs().isr().read().addcode();
-        let address = if matched >> 3 == 0b11110 {
-            // is 10-bit address and we need to get the other 8 bits from the rxdr
-            // we do this by doing a blocking read of 1 byte
-            let mut buffer = [0];
-            Self::blocking_read(&mut buffer, self.timeout())?;
-            Ok(OwnAddress::TenBit((matched as u16) << 6 | buffer[0] as u16))
-        } else {
-            Ok(OwnAddress::SevenBit(matched))
-        };
-
-        address
-    }
-
-    fn blocking_read(buffer: &mut [u8], timeout: Timeout) -> Result<(), Error> {
-        for byte in buffer.iter_mut() {
-            while !T::regs().isr().read().rxne() {
-                timeout.check()?;
-            }
-            *byte = T::regs().rxdr().read().rxdata();
-        }
-        Ok(())
-    }
-}
-
-impl<'d, T: Instance> I2cSlave<'d, T, Async> {
-    pub async fn respond_to_receive(&mut self, buffer: &mut [u8]) -> Result<ReceiveStatus, Error> {
-        let timeout = self.timeout();
-        let size = timeout.with(self.read_dma_internal(buffer, timeout)).await?;
-
-        T::regs().cr1().modify(|reg| {
-            reg.set_addrie(true);
-        });
-
-        let state = T::state();
-
-        let send_requested = self
-            .timeout()
-            .with(poll_fn(|cx| {
-                state.waker.register(cx.waker());
-
-                let isr = T::regs().isr().read();
-                if isr.addr() {
-                    if isr.dir() == i2c::vals::Dir::READ {
-                        return Poll::Ready(Ok(ReceiveStatus::SendRequested(size)));
-                    } else {
-                        return Poll::Ready(Ok(ReceiveStatus::Done(size)));
-                    }
-                };
-                return Poll::Pending;
-            }))
-            .await;
-
-        match send_requested {
-            Ok(ReceiveStatus::SendRequested(size)) => Ok(ReceiveStatus::SendRequested(size)),
-            Ok(ReceiveStatus::Done(_)) | Err(_) => Ok(ReceiveStatus::Done(size)),
-        }
-    }
-
-    pub async fn respond_to_send(&mut self, buffer: &[u8]) -> Result<SendStatus, Error> {
-        let timeout = self.timeout();
-        timeout.with(self.write_dma_internal(buffer, timeout, false)).await
-    }
-
-    // pub async fn respond_and_fill(&mut self, buffer: &[u8], fill: u8) -> Result<SendStatus, Error> {
-    //     let resp_stat = self.respond_to_send(buffer).await?;
-
-    //     let res = if matches!(resp_stat, SendStatus::MoreBytesRequested) {
-    //         self.write_dma_internal(&[fill], self.timeout(), true).await?;
-    //         Ok(SendStatus::Done)
-    //     } else {
-    //         Ok(resp_stat)
-    //     };
-
-    //     res
-    // }
-
-    // for data reception in slave mode
-    async fn read_dma_internal(&mut self, buffer: &mut [u8], timeout: Timeout) -> Result<usize, Error> {
-        let total_len = buffer.len();
-
-        let mut dma_transfer = unsafe {
-            let regs = T::regs();
-            regs.cr2().modify(|w| w.set_nbytes(total_len as u8));
-            regs.cr1().modify(|w| {
-                w.set_rxdmaen(true);
-                w.set_stopie(true);
-            });
-            let src = regs.rxdr().as_ptr() as *mut u8;
-
-            self.rx_dma.as_mut().unwrap().read(src, buffer, Default::default())
-        };
-
-        let state = T::state();
-        let mut remaining_len = total_len;
-
-        let on_drop = OnDrop::new(|| {
-            let regs = T::regs();
-            regs.cr1().modify(|w| {
-                w.set_rxdmaen(false);
-                w.set_stopie(false);
-            })
-        });
-        T::regs().icr().modify(|reg| reg.set_addrcf(true));
-
-        let total_received = poll_fn(|cx| {
-            state.waker.register(cx.waker());
-
-            let isr = T::regs().isr().read();
-            if isr.stopf() {
-                T::regs().icr().write(|reg| reg.set_stopcf(true));
-                let poll = Poll::Ready(Ok(total_len - dma_transfer.get_remaining_transfers() as usize));
-                dma_transfer.request_stop();
-                poll
-            } else {
-                Poll::Pending
-            }
-        })
-        .await?;
-
-        dma_transfer.await;
-
-        drop(on_drop);
-
-        Ok(total_received)
-    }
-    // writing dma (mem -> peripheral) is for responding to an I2C slave read request
-    // setting circular to true is used to write a single byte until the stop condition
-    async fn write_dma_internal(
-        &mut self,
-        buffer: &[u8],
-        timeout: Timeout,
-        circular: bool,
-    ) -> Result<SendStatus, Error> {
-        let total_len = if circular { 255 } else { buffer.len() };
-
-        let timeout = self.timeout();
-
-        let mut dma_transfer = unsafe {
-            let regs = T::regs();
-            regs.cr2().modify(|w| w.set_nbytes(total_len as u8));
-            regs.cr1().modify(|w| {
-                w.set_txdmaen(true);
-                w.set_stopie(true);
-            });
-            let dst = regs.txdr().as_ptr() as *mut u8;
-
-            let transfer_options = TransferOptions {
-                circular,
-                ..Default::default()
-            };
-            self.tx_dma.as_mut().unwrap().write(buffer, dst, transfer_options)
-        };
-        T::regs().icr().modify(|reg| reg.set_addrcf(true));
-
-        let state = T::state();
-        let mut remaining_len = total_len;
-
-        let on_drop = OnDrop::new(|| {
-            let regs = T::regs();
-            regs.cr1().modify(|w| {
-                w.set_txdmaen(false);
-                w.set_stopie(false);
-            })
-        });
-
-        let size = poll_fn(|cx| {
-            state.waker.register(cx.waker());
-
-            let isr = T::regs().isr().read();
-            if isr.stopf() {
-                T::regs().icr().write(|reg| reg.set_stopcf(true));
-                let remaining = dma_transfer.get_remaining_transfers();
-                if remaining > 0 {
-                    dma_transfer.request_stop();
-                    Poll::Ready(Ok(SendStatus::LeftoverBytes(remaining as usize)))
-                } else {
-                    Poll::Ready(Ok(SendStatus::Done))
-                }
-            } else {
-                Poll::Pending
-            }
-        })
-        .await?;
-
-        dma_transfer.await;
-
-        drop(on_drop);
-
-        Ok(size)
     }
 }
