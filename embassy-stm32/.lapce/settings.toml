@@ -1,0 +1,5 @@
+[lapce-rust]
+check.allTargets = false
+check.targets = "thumbv7em-none-eabihf"
+check.command = "check"
+cargo.features = ["stm32g491ke"]

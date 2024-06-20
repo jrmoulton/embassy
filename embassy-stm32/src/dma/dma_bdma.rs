@@ -406,7 +406,7 @@ impl AnyChannel {
                 ch.mar().write_value(mem_addr as u32);
                 ch.ndtr().write(|w| w.set_ndt(mem_len as u16));
                 ch.cr().write(|w| {
-                    w.set_psize(data_size.into());
+                    w.set_psize(WordSize::FourBytes.into());
                     w.set_msize(data_size.into());
                     w.set_minc(incr_mem);
                     w.set_dir(dir.into());
